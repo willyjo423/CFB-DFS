@@ -1,0 +1,68 @@
+name: MLB fetch
+
+# ~2,430 box scores per season, roughly twelve minutes of HTTP. Paid once,
+# committed, then never again. Grading reads data/ and never the network.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: "Seasons to fetch, space separated"
+        required: false
+        default: "2025 2026"
+      refresh:
+        description: "Seasons to re-fetch even if cached (the live one)"
+        required: false
+        default: ""
+      limit:
+        description: "Cap games per season (0 = all). Use 300 for a trial."
+        required: false
+        default: "0"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mlbfetch
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Fetch
+        run: |
+          python mlb_fetch.py --seasons "${{ inputs.seasons }}" \
+                              --refresh "${{ inputs.refresh }}" \
+                              --limit ${{ inputs.limit }} 2>&1 | tee mlbfetch.txt
+
+      - name: Commit whatever was fetched
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f data/ || true
+          if git diff --staged --quiet; then
+            echo "nothing new to commit"
+          else
+            git commit -m "Cache MLB history: ${{ inputs.seasons }}"
+            git push
+          fi
+
+      - name: Put it on the run page
+        if: always()
+        run: |
+          echo '## MLB fetch' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -c 40000 mlbfetch.txt >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
