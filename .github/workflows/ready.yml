@@ -1,0 +1,69 @@
+name: CFB ready
+
+# Three blocking questions the depth probe raised:
+#   1. Which 2026 weeks return player stats, and did those games finish?
+#      (the games endpoint is the control - a zero with no completed games
+#       means nothing is wrong, a zero with 60 completed games means a lot)
+#   2. Do athlete ids from games/players join to roster ids? That decides
+#      whether positions come from an exact id join or from name matching.
+#   3. Of the players who actually score, how many get a position?
+
+on:
+  workflow_dispatch:
+    inputs:
+      season:
+        description: "Current season"
+        required: false
+        default: "2026"
+      last_week:
+        description: "Probe weeks 0..N of the current season"
+        required: false
+        default: "6"
+      join_season:
+        description: "A finished season, for the position-join test"
+        required: false
+        default: "2025"
+
+jobs:
+  ready:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Probe
+        env:
+          CFBD_API_KEY: ${{ secrets.CFBD_API_KEY }}
+        run: |
+          python cfb_ready.py \
+            --season ${{ inputs.season }} \
+            --last-week ${{ inputs.last_week }} \
+            --join-season ${{ inputs.join_season }} 2>&1 | tee ready.txt
+
+      - name: Put it on the run page
+        if: always()
+        run: |
+          {
+            echo '## CFB ready'
+            echo '```'
+            tail -c 60000 ready.txt || echo "(no output captured)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cfb-ready
+          path: |
+            ready.txt
+            cfb_ready.csv
+          retention-days: 30
+          if-no-files-found: warn
