@@ -134,6 +134,8 @@ def main() -> int:
                         format="%(levelname)s %(name)s: %(message)s")
     p = argparse.ArgumentParser()
     p.add_argument("--season", type=int, default=2026)
+    p.add_argument("--first-season", type=int, default=2023,
+                   help="earliest season of training history to join against")
     p.add_argument("--draft-group", type=int, default=0)
     p.add_argument("--game-type", default="Classic")
     args = p.parse_args()
@@ -181,7 +183,11 @@ def main() -> int:
     head("TEAM MAP")
     games = D.cfbd("games", key, year=args.season, week=week + 1,
                    seasonType="regular")
-    mapping = D.fixture_team_map(board, games)
+    # The teams endpoint carries abbreviations and alternate names. Without it
+    # this mapped 6 of 24: Georgia's abbreviation IS "UGA", and no rule
+    # derives that from the string "Georgia".
+    teams = D.cfbd("teams", key, year=args.season)
+    mapping = D.fixture_team_map(board, games, teams)
     codes = sorted(set(board["team"].dropna()))
     for code in codes:
         print(f"  {code:<8} -> {mapping.get(code, '*** UNSOLVED ***')}")
@@ -192,6 +198,11 @@ def main() -> int:
         problems += 1
 
     head("HISTORY")
+    # The first run joined against two weeks of one season and matched 44% of
+    # the board, which looked like a broken join and was not: a backup
+    # quarterback priced at $8,500 with 0.0 published points per game has no
+    # 2026 stats because he has not played. The model trains on many seasons,
+    # so the join has to be measured against many seasons.
     hist = D.season_history(key, args.season, week)
     print(f"{len(hist):,} player-games, {hist['athlete_id'].nunique():,} "
           f"athletes, weeks 1-{week}")
@@ -202,11 +213,35 @@ def main() -> int:
           .groupby("position")["points"]
           .agg(["size", "mean", "max"]).round(2).to_string())
 
-    head("THE JOIN")
+    head("THE JOIN  (current season only)")
     joined = D.attach_history(board, hist)
     print(D.join_quality(joined))
+    print("\nThis number is expected to be poor early in a season and is NOT")
+    print("the one to judge. Backups with no snaps have no stats. The")
+    print("multi-season join below is what the model actually sees.")
 
+    # Scoring is validated against the CURRENT season only, because
+    # DraftKings' published points per game is a this-season number.
     problems += scoring_check(joined, hist)
+
+    head(f"THE JOIN  (training history, {args.first_season}-{args.season})")
+    deep = D.training_history(key, args.first_season, args.season,
+                              through_week={args.season: week})
+    print(f"{len(deep):,} player-games across "
+          f"{deep['season'].nunique()} seasons, "
+          f"{deep['athlete_id'].nunique():,} athletes")
+    joined_deep = D.attach_history(board, deep)
+    print()
+    print(D.join_quality(joined_deep))
+    rate = joined_deep["athlete_id"].notna().mean()
+    print()
+    if rate >= 0.90:
+        print(f"PASS - {rate:.1%} of the priced board has history to project "
+              f"from.")
+    else:
+        print(f"FAIL - only {rate:.1%} of the board has any history. "
+              f"Projections would be guesses for the rest.")
+        problems += 1
 
     head("VERDICT")
     if problems == 0:
