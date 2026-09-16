@@ -213,7 +213,7 @@ def main() -> int:
           .agg(["size", "mean", "max"]).round(2).to_string())
 
     head("THE JOIN  (current season only)")
-    joined = D.attach_history(board, hist)
+    joined = D.attach_history(board, hist, team_map=mapping)
     print(D.join_quality(joined))
     print("\nThis number is expected to be poor early in a season and is NOT")
     print("the one to judge. Backups with no snaps have no stats. The")
@@ -229,9 +229,11 @@ def main() -> int:
     print(f"{len(deep):,} player-games across "
           f"{deep['season'].nunique()} seasons, "
           f"{deep['athlete_id'].nunique():,} athletes")
-    joined_deep = D.attach_history(board, deep)
+    joined_deep = D.attach_history(board, deep, team_map=mapping)
     print()
     print(D.join_quality(joined_deep))
+    print()
+    print(D.diagnose_misses(joined_deep, deep, team_map=mapping))
     # Gated on real misses, not raw rate. An earlier version demanded 90% of
     # the board and failed at 59.4%, which measured the wrong thing: most of
     # a college board is third-string players DraftKings itself scores at
