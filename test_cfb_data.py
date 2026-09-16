@@ -179,6 +179,49 @@ def test_classic_board_has_no_captains():
 
 # --------------------------------------------------------------------- join
 
+def test_middle_initial_is_bridged_when_unambiguous():
+    """Tyler J. Williams on the board, Tyler Williams in CFBD.
+
+    No exact reduction bridges this - deleting a middle token is not a
+    spelling difference - so it needs its own pass.
+    """
+    board = pd.DataFrame([{"name": "Tyler J. Williams", "salary": 3000,
+                           "position": "WR", "team": "UGA"}])
+    board["keys"] = board["name"].map(D.name_keys)
+    hist = pd.DataFrame([{"athlete_id": "9", "name": "Tyler Williams"}])
+    hist["keys"] = hist["name"].map(D.name_keys)
+    assert D.attach_history(board, hist)["athlete_id"].iloc[0] == "9"
+
+
+def test_middle_initial_is_NOT_bridged_when_ambiguous():
+    """Two Tyler Williamses. A coin flip on a real salary beats no miss.
+
+    This is the test that makes the pass above safe. Without the uniqueness
+    requirement it would attach one of these two at random, and a wrong
+    projection is worse than an absent one - the absent one is dropped from
+    the pool, the wrong one gets rostered.
+    """
+    board = pd.DataFrame([{"name": "Tyler J. Williams", "salary": 3000,
+                           "position": "WR", "team": "UGA"}])
+    board["keys"] = board["name"].map(D.name_keys)
+    hist = pd.DataFrame([{"athlete_id": "9", "name": "Tyler Williams"},
+                         {"athlete_id": "10", "name": "Tyler Adam Williams"}])
+    hist["keys"] = hist["name"].map(D.name_keys)
+    got = D.attach_history(board, hist)["athlete_id"].iloc[0]
+    assert got is None or pd.isna(got), got
+
+
+def test_exact_match_still_wins_over_the_reduced_pass():
+    """A real middle name must not be discarded when it identifies someone."""
+    board = pd.DataFrame([{"name": "Tyler Adam Williams", "salary": 3000,
+                           "position": "WR", "team": "UGA"}])
+    board["keys"] = board["name"].map(D.name_keys)
+    hist = pd.DataFrame([{"athlete_id": "9", "name": "Tyler Adam Williams"},
+                         {"athlete_id": "10", "name": "Tyler Williams"}])
+    hist["keys"] = hist["name"].map(D.name_keys)
+    assert D.attach_history(board, hist)["athlete_id"].iloc[0] == "9"
+
+
 def test_join_matches_across_spellings():
     board = pd.DataFrame([{"name": "AJ Swann", "salary": 8500,
                            "position": "QB", "team": "ARK"}])
