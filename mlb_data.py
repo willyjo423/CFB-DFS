@@ -201,16 +201,20 @@ def describe_payload(box: dict) -> str:
 
 
 def _decisions(box: dict) -> set:
-    """Player ids credited with a win, from wherever the payload keeps it.
+    """Player ids credited with a win, if the payload carries a decisions
+    block at all.
 
-    The win is worth four points and is the one pitcher input not carried in
-    the per-player pitching block on every payload shape. Looked for in
-    several places and simply absent if none of them has it, rather than
-    guessed.
+    The boxscore endpoint does NOT: its top-level keys are copyright, info,
+    officials, pitchingNotes, teams and topPerformers. The first live run
+    found zero wins across 120 games, which is four points missing from
+    every winning pitcher.
+
+    The win is in fact sitting in each pitcher's own stats block as `wins`,
+    which is where it is read from now. This stays as a fallback for the
+    live-feed payload shape, which does carry decisions.
     """
     out = set()
-    info = box.get("decisions") or {}
-    w = info.get("winner") or {}
+    w = (box.get("decisions") or {}).get("winner") or {}
     if w.get("id") is not None:
         out.add(str(w["id"]))
     return out
@@ -264,11 +268,20 @@ def player_games(box: dict, game: dict) -> list[dict]:
                 "earned_run": _n(pit.get("earnedRuns")),
                 "hit_allowed": _n(pit.get("hits")),
                 "walk_allowed": _n(pit.get("baseOnBalls")),
-                "hbp_allowed": _n(pit.get("hitByPitch")),
+                # `hitBatsmen` is the canonical field for batters this
+                # pitcher hit. `hitByPitch` also appears in the pitching
+                # block and is not reliably the same thing, so it is only a
+                # fallback.
+                "hbp_allowed": _n(pit.get("hitBatsmen",
+                                          pit.get("hitByPitch"))),
                 "complete_game": _n(pit.get("completeGames")),
                 "shutout": _n(pit.get("shutouts")),
                 "batters_faced": _n(pit.get("battersFaced")),
-                "win": 1.0 if str(pid) in winners else 0.0,
+                # From the pitcher's own line first. The boxscore endpoint
+                # has no decisions block, and trusting one that is not there
+                # cost every winning pitcher four points on the first run.
+                "win": (1.0 if _n(pit.get("wins")) > 0
+                        or str(pid) in winners else 0.0),
                 "pitched": 1.0 if pit else 0.0,
             })
     return rows
@@ -404,8 +417,26 @@ def board(draft_group: int) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-_ID_FIELDS = ("mlbId", "MlbId", "sportsRadarId", "pid2", "playerId",
-              "externalId", "srid")
+_ID_FIELDS = ("mlbId", "MlbId", "mlbid", "sportsRadarId", "pid2",
+              "playerId", "externalId", "srid", "pcode", "tpid")
+
+
+def board_row_keys(draft_group: int) -> str:
+    """Every key DraftKings actually sends for a player, printed.
+
+    Seven guessed field names found a league id on zero of 652 rows. Rather
+    than guess an eighth, this prints what is really there - the same move
+    that turned the box-score question from three rounds into one line.
+    """
+    payload = _get(DK_PLAYERS.format(dg=draft_group))
+    raw = (payload.get("playerList") or payload.get("draftables")
+           or payload.get("players") or [])
+    if not raw:
+        return "no players on that draft group"
+    lines = [f"DraftKings sends {len(raw[0])} fields per player:"]
+    for k, v in sorted(raw[0].items()):
+        lines.append(f"    {k:<22} {str(v)[:44]}")
+    return "\n".join(lines)
 
 
 def _first_id(p: dict):
