@@ -822,6 +822,23 @@ def fixture_team_map(board_df: pd.DataFrame, games: list[dict],
         log.warning("no teams payload - falling back to name matching alone, "
                     "which maps roughly a quarter of DraftKings' codes")
 
+    # How much a proposal is worth, for breaking ties between relaxations.
+    # A code identical to the school's own name is near-certain. An
+    # abbreviation is a convention, and conventions are exactly what the two
+    # sources disagree about - UL is Louisiana to CFBD and Louisville to
+    # DraftKings. A constructed guess is worth least of all.
+    name_code = {s: _clean_code("".join(_tokens(s))) for s in schools}
+
+    def strength(code: str) -> int:
+        c = _clean_code(code)
+        if any(c == v for v in name_code.values()):
+            return 3                       # the school's own name
+        if c in claimed:
+            return 2                       # an official abbreviation
+        if any(c in a for a in constructed.values()):
+            return 1                       # something we made up
+        return 0
+
     def proposes(code: str, school: str) -> bool:
         c = _clean_code(code)
         if not official:
@@ -926,26 +943,64 @@ def fixture_team_map(board_df: pd.DataFrame, games: list[dict],
         stuck = [fx for fx in unsolved if not candidates(*fx)]
         if not stuck:
             break
-        # Relax ONLY the ambiguous side. A first version relaxed both codes
-        # in a stuck fixture and solved strictly nothing: freeing UTAH along
-        # with UTST threw away the single good constraint and turned zero
-        # candidates into three. A code proposing exactly one school is
-        # probably right and is kept; a code proposing several is the one
-        # that put the fixture in this state.
-        relaxed = set()
-        for fx in stuck:
-            for c in fx:
-                if c in mapping or c in free:
+        # Relax ONE code at a time and keep the relaxation that yields a
+        # unique answer. Two earlier rules both failed here:
+        #
+        #   Relaxing BOTH codes threw away the good constraint along with the
+        #   bad one and turned zero candidates into several.
+        #
+        #   Relaxing only codes that proposed several schools assumed a code
+        #   proposing exactly one was right. UL is the counterexample and it
+        #   is not rare: CFBD's official abbreviation UL belongs to
+        #   Louisiana, DraftKings used UL for Louisville on this board, and
+        #   the fixture list settles it - SMU plays Louisville. A confident
+        #   single proposal can simply be wrong, and an official alias is
+        #   still only a proposal.
+        #
+        # Dropping one code's proposals at a time asks the narrowest question
+        # that could help: is this fixture determined by the OTHER side
+        # alone? If exactly one of the two relaxations gives a unique game,
+        # that is the answer. If both do, they disagree, and a disagreement
+        # is ambiguity - refuse it.
+        progressed = False
+        for fx in list(stuck):
+            away_code, home_code = fx
+            solutions = []
+            for code in (away_code, home_code):
+                if code in mapping or code in free:
                     continue
-                if sum(1 for s in schools if proposes(c, s)) != 1:
-                    relaxed.add(c)
-        if not relaxed:
+                free.add(code)
+                found = candidates(away_code, home_code)
+                free.discard(code)
+                if len(found) == 1:
+                    solutions.append((code, found[0]))
+            if not solutions:
+                continue
+            if len(solutions) > 1:
+                # Both sides determine a game, and they disagree. Give up the
+                # weaker proposal: relaxing the code whose evidence is
+                # flimsiest is the smallest concession that resolves it.
+                # SMU is a school's actual name; UL is an abbreviation. Only
+                # if the evidence is equally strong on both sides is this
+                # genuine ambiguity, and then it is refused.
+                solutions.sort(key=lambda s: strength(s[0]))
+                if strength(solutions[0][0]) == strength(solutions[1][0]):
+                    log.warning("  %s @ %s: both sides determine a different "
+                                "game and the evidence is equally strong - "
+                                "refusing to guess", away_code, home_code)
+                    continue
+                solutions = solutions[:1]
+            code, (a, h) = solutions[0]
+            if a in mapping.values() or h in mapping.values():
+                continue
+            mapping[away_code], mapping[home_code] = a, h
+            unsolved.remove(fx)
+            progressed = True
+            log.info("%s @ %s had no candidate; ignoring %s's proposals "
+                     "resolves it uniquely to %s @ %s",
+                     away_code, home_code, code, a, h)
+        if not progressed:
             break
-        log.info("no candidate fixture for %d pairing(s); relaxing %s to be "
-                 "solved by opponent alone", len(stuck),
-                 ", ".join(sorted(relaxed)))
-        free |= relaxed
-        unsolved = run(unsolved)
 
     if unsolved:
         log.warning("%d fixtures did not resolve to exactly one CFBD game: %s",
