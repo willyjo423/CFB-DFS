@@ -302,6 +302,63 @@ LIVE_MISSES = [
 ]
 
 
+def test_fallbacks_run_on_a_PARTIALLY_matched_board():
+    """The test whose absence hid three dead code paths.
+
+    Every other join test here uses a board where NO player matches strictly.
+    That is not what a real board looks like, and the difference is not
+    cosmetic: a column of all-Nones keeps pandas' object dtype and real None
+    values, while a mixed column of strings and Nones becomes the string
+    dtype, where every None silently becomes NaN. A guard written as
+    "if already_matched: skip" then skips every unmatched row instead, and
+    all three fallback passes never execute.
+
+    That is exactly what happened - on the live board they matched nothing
+    while passing every test, because the fixtures differed from production
+    in precisely the dimension under test. So this board mixes both.
+    """
+    board = pd.DataFrame([
+        # matches strictly
+        {"name": "Gunner Stockton", "salary": 9200, "position": "QB",
+         "team": "UGA", "dk_points_per_game": 24.9},
+        # needs the name-form fallback
+        {"name": "Matt Fuller", "salary": 4900, "position": "RB",
+         "team": "SCAR", "dk_points_per_game": 17.9},
+        # matches strictly
+        {"name": "Nate Sheppard", "salary": 9200, "position": "RB",
+         "team": "DUKE", "dk_points_per_game": 43.2},
+    ])
+    board["keys"] = board["name"].map(D.name_keys)
+    hist = pd.DataFrame([
+        {"athlete_id": "1", "name": "Gunner Stockton", "school": "Georgia"},
+        {"athlete_id": "2", "name": "Matthew Fuller",
+         "school": "South Carolina"},
+        {"athlete_id": "3", "name": "Nate Sheppard", "school": "Duke"},
+    ])
+    hist["keys"] = hist["name"].map(D.name_keys)
+    out = D.attach_history(board, hist, team_map={
+        "UGA": "Georgia", "SCAR": "South Carolina", "DUKE": "Duke"})
+    assert list(out["athlete_id"]) == ["1", "2", "3"], list(out["athlete_id"])
+
+
+def test_unmatched_entries_survive_as_None_not_NaN():
+    """Downstream code checks these. They must not become floats."""
+    board = pd.DataFrame([
+        {"name": "Gunner Stockton", "salary": 9200, "position": "QB",
+         "team": "UGA", "dk_points_per_game": 24.9},
+        {"name": "Nobody At All", "salary": 3000, "position": "WR",
+         "team": "UGA", "dk_points_per_game": 0.0},
+    ])
+    board["keys"] = board["name"].map(D.name_keys)
+    hist = pd.DataFrame([{"athlete_id": "1", "name": "Gunner Stockton",
+                          "school": "Georgia"}])
+    hist["keys"] = hist["name"].map(D.name_keys)
+    out = D.attach_history(board, hist, team_map={"UGA": "Georgia"})
+    assert out["athlete_id"].iloc[0] == "1"
+    assert out["athlete_id"].iloc[1] is None, repr(out["athlete_id"].iloc[1])
+    assert D.real_misses(out).empty          # 0.0 ppg, so not a real miss
+
+
 def test_every_live_miss_resolves_as_measured():
     """The eight fixable misses fix, and the three unfixable ones stay out.
 
