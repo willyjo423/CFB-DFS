@@ -110,12 +110,32 @@ def _margins(df: pd.DataFrame) -> pd.DataFrame:
     """
     team_pts = (df.groupby(["team", "season", "week"], as_index=False)
                 ["points"].sum().rename(columns={"points": "_team_points"}))
-    opp_pts = team_pts.rename(columns={"team": "opponent",
-                                       "_team_points": "_opp_points"})
-    m = team_pts.merge(opp_pts, on=["season", "week"], how="inner")
-    m = m[m["team"] != m["opponent"]]
+
+    # Join through the REAL fixtures. A first version merged team totals
+    # against themselves on (season, week) and filtered out self-pairings,
+    # which is a cross join: with ten teams in a week it produced nine rows
+    # per team-game instead of one, and the merge downstream then fanned the
+    # whole feature frame out forty-fold. Nothing raised - the training set
+    # simply became mostly duplicates, which quietly reweights every fit.
+    fixtures = df[["team", "opponent", "season", "week"]].drop_duplicates()
+    m = fixtures.merge(team_pts, on=["team", "season", "week"], how="left")
+    m = m.merge(team_pts.rename(columns={"team": "opponent",
+                                         "_team_points": "_opp_points"}),
+                on=["opponent", "season", "week"], how="left")
     m["margin"] = m["_team_points"] - m["_opp_points"]
-    return m[["team", "opponent", "season", "week", "margin"]]
+    m = m[["team", "opponent", "season", "week", "margin"]]
+
+    # One row per team-week, whatever the input claimed. A team with two
+    # opponents in a week is not football, but it IS what a mis-joined or
+    # duplicated history looks like, and the consequence of passing it
+    # through is a silent fan-out downstream rather than an error.
+    dupes = int(m.duplicated(["team", "season", "week"]).sum())
+    if dupes:
+        log.warning("%d team-weeks have more than one opponent; keeping the "
+                    "first. This usually means the history is duplicated or "
+                    "the team map merged two schools", dupes)
+        m = m.drop_duplicates(["team", "season", "week"])
+    return m
 
 
 def _team_context(df: pd.DataFrame) -> pd.DataFrame:
@@ -165,6 +185,7 @@ def _opponent_context(df: pd.DataFrame) -> pd.DataFrame:
 def build(hist: pd.DataFrame) -> pd.DataFrame:
     """One row per player-week, with the target and every feature."""
     df = to_model_frame(hist).copy()
+    n_in = len(df)
     for c in USAGE:
         if c not in df.columns:
             df[c] = 0.0
@@ -241,6 +262,17 @@ def build(hist: pd.DataFrame) -> pd.DataFrame:
     missing = [c for c in FEATURES if c not in df.columns]
     if missing:
         raise ValueError(f"build() did not produce {missing}")
+
+    # Cheap insurance against every future merge. This function derives
+    # columns; it must never change the number of rows. A join against a
+    # frame with duplicate keys does exactly that and raises nothing - the
+    # training set simply becomes duplicates, reweighting every fit, and the
+    # numbers still look plausible.
+    if len(df) != n_in:
+        raise ValueError(
+            f"build() changed the row count: {n_in} in, {len(df)} out. "
+            f"A merge fanned out on duplicate keys; the features are not "
+            f"trustworthy and the fit would be silently reweighted.")
     log.info("features: %d rows, %d players, %d columns, seasons %s",
              len(df), df["player_id"].nunique(), len(FEATURES),
              sorted(df["season"].unique()))
