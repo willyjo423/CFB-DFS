@@ -1,0 +1,86 @@
+name: CFB grade
+
+# Does the model beat what it has to beat. Walk-forward: fit on everything
+# strictly before week W, predict W, refit, move on. Reported against three
+# baselines, because an MAE means nothing on its own.
+#
+# Runs long - each graded week refits seven models on years of history.
+# Use the quantiles input to cut that roughly in half while iterating.
+
+on:
+  workflow_dispatch:
+    inputs:
+      first_season:
+        description: "Earliest training season"
+        required: false
+        default: "2021"
+      test_season:
+        description: "Season to grade"
+        required: false
+        default: "2025"
+      first_week:
+        description: "First week to grade"
+        required: false
+        default: "6"
+      last_week:
+        description: "Last week to grade"
+        required: false
+        default: "13"
+      quantiles:
+        description: "Blank for all six; 0.1,0.5,0.9 to run faster"
+        required: false
+        default: ""
+
+jobs:
+  grade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Unit tests first
+        run: |
+          python test_cfb_data.py
+          python test_cfb_features.py
+
+      - name: Grade
+        env:
+          CFBD_API_KEY: ${{ secrets.CFBD_API_KEY }}
+        run: |
+          ARGS="--first-season ${{ inputs.first_season }}"
+          ARGS="$ARGS --test-season ${{ inputs.test_season }}"
+          ARGS="$ARGS --first-week ${{ inputs.first_week }}"
+          ARGS="$ARGS --last-week ${{ inputs.last_week }}"
+          if [ -n "${{ inputs.quantiles }}" ]; then
+            ARGS="$ARGS --quantiles ${{ inputs.quantiles }}"
+          fi
+          echo "EFFECTIVE ARGS: $ARGS"
+          python cfb_run_grade.py $ARGS 2>&1 | tee grade.txt
+
+      - name: Put it on the run page
+        if: always()
+        run: |
+          {
+            echo '## CFB grade'
+            echo '```'
+            tail -c 60000 grade.txt || echo "(no output captured)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cfb-grade
+          path: |
+            grade.txt
+            cfb_graded.csv
+          retention-days: 30
+          if-no-files-found: warn
