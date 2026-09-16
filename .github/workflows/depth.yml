@@ -1,0 +1,60 @@
+name: CFB depth
+
+# Before fitting anything, find out what there is to fit.
+# Answers three questions by fetching: how far back player stats go,
+# whether those seasons have POSITIONS (the roster endpoint is the only
+# source, and a stat line with no position can't fill a roster slot),
+# and how many player-games per season the training set would actually get.
+
+on:
+  workflow_dispatch:
+    inputs:
+      first:
+        description: "Earliest season to probe"
+        required: false
+        default: "2014"
+      last:
+        description: "Latest season to probe"
+        required: false
+        default: "2026"
+
+jobs:
+  depth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Probe
+        env:
+          CFBD_API_KEY: ${{ secrets.CFBD_API_KEY }}
+        run: |
+          python cfb_depth.py --first ${{ inputs.first }} --last ${{ inputs.last }} 2>&1 | tee depth.txt
+
+      - name: Put it on the run page
+        if: always()
+        run: |
+          {
+            echo '## CFB depth'
+            echo '```'
+            tail -c 60000 depth.txt || echo "(no output captured)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cfb-depth
+          path: |
+            depth.txt
+            cfb_depth.csv
+          retention-days: 30
+          if-no-files-found: warn
