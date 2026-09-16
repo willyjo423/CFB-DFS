@@ -552,8 +552,8 @@ def training_history(key: str, first: int, last: int,
 
 # ----------------------------------------------------------------- the join
 
-def attach_history(board_df: pd.DataFrame, hist: pd.DataFrame
-                   ) -> pd.DataFrame:
+def attach_history(board_df: pd.DataFrame, hist: pd.DataFrame,
+                   team_map: dict | None = None) -> pd.DataFrame:
     """Give every priced player his own scored games, or nothing.
 
     Matching is on EITHER spelling. The index is built from the history side's
@@ -600,26 +600,56 @@ def attach_history(board_df: pd.DataFrame, hist: pd.DataFrame
                 reduced.setdefault(s, set()).add(athlete)
     unique = {k: next(iter(v)) for k, v in reduced.items() if len(v) == 1}
 
+    # The same reduction, restricted to one school. "Ryan Williams" is
+    # ambiguous across four seasons of college football and completely
+    # unambiguous at Alabama, and the team map - now that it resolves all
+    # twenty-four codes - tells us which school every priced player is on.
+    # This is the payoff for solving the team map properly.
+    by_school: dict[tuple, set[str]] = {}
+    if team_map is not None and "school" in hist:
+        for athlete, school, keys in zip(hist["athlete_id"], hist["school"],
+                                         hist["keys"]):
+            for k in keys:
+                s = _short(k)
+                if s:
+                    by_school.setdefault((school, s), set()).add(athlete)
+    school_unique = {k: next(iter(v)) for k, v in by_school.items()
+                     if len(v) == 1}
+
     ambiguous = 0
+    by_team = 0
     col = out.columns.get_loc("athlete_id")
-    for i, (aid, keys) in enumerate(zip(out["athlete_id"], out["keys"])):
+    teams_col = out["team"] if "team" in out else pd.Series([None] * len(out))
+    for i, (aid, keys, team) in enumerate(zip(out["athlete_id"], out["keys"],
+                                              teams_col)):
         if aid is not None:
             continue
+        school = (team_map or {}).get(team)
+        hit = None
         for k in keys:
             short = _short(k)
             if not short:
                 continue
             if short in unique:
-                out.iloc[i, col] = unique[short]
+                hit = unique[short]
+                break
+            if school is not None and (school, short) in school_unique:
+                hit = school_unique[(school, short)]
+                by_team += 1
                 break
             if short in reduced:
                 ambiguous += 1
-                break
+        if hit is not None:
+            out.iloc[i, col] = hit
 
     n = int(out["athlete_id"].notna().sum())
-    if n > strict:
+    if n - strict - by_team > 0:
         log.info("join: %d extra matched by dropping a middle name, each "
-                 "unambiguous in the full history", n - strict)
+                 "unambiguous in the full history", n - strict - by_team)
+    if by_team:
+        log.info("join: %d matched by name within their own school, where a "
+                 "name ambiguous across all of college football is unique",
+                 by_team)
     if ambiguous:
         log.info("join: %d left unmatched because dropping the middle name "
                  "matched more than one athlete - a guess there is worse "
@@ -675,6 +705,53 @@ def join_quality(joined: pd.DataFrame) -> str:
                 lines.append(f"    ${int(r.salary):>6,}  {r.position:<4} "
                              f"{str(r.name)[:26]:<27} {r.team:<6} "
                              f"{float(r.dk_points_per_game):>6.1f} ppg")
+    return "\n".join(lines)
+
+
+def diagnose_misses(joined: pd.DataFrame, hist: pd.DataFrame,
+                    team_map: dict | None = None, limit: int = 12) -> str:
+    """For every real miss, what the history DOES contain for his school.
+
+    Three rounds of this were spent guessing at causes - the position filter,
+    then name ambiguity - and fixing the guess. Each guess was plausible and
+    the first was even a genuine bug, but neither moved this number.
+
+    A miss has a small number of possible explanations and they are trivially
+    distinguishable by looking: a near-identical name is a spelling variant,
+    a same-school roster with nobody similar means he is absent from CFBD
+    entirely, and an empty school means the team map or the school label is
+    wrong. So print the evidence instead of theorising about it.
+    """
+    from difflib import SequenceMatcher
+
+    bad = real_misses(joined)
+    if bad.empty:
+        return "no real misses to diagnose"
+    lines = [f"Diagnosing {len(bad)} real misses - what the history holds "
+             f"for each man's school:"]
+    for r in bad.nlargest(limit, "dk_points_per_game").itertuples(index=False):
+        school = (team_map or {}).get(getattr(r, "team", None))
+        lines.append("")
+        lines.append(f"  {str(r.name)[:30]:<31}{r.team} "
+                     f"({school or 'SCHOOL UNMAPPED'})  "
+                     f"{float(r.dk_points_per_game):.1f} ppg")
+        if school is None or "school" not in hist:
+            lines.append("    cannot search - no school for this player")
+            continue
+        pool = hist[hist["school"] == school]
+        if pool.empty:
+            lines.append(f"    NO history rows at all for {school} - the "
+                         f"school label or the team map is wrong")
+            continue
+        target = primary_key(r.name)
+        names = pool.drop_duplicates("athlete_id")[["name", "athlete_id"]]
+        scored = sorted(
+            ((SequenceMatcher(None, target, primary_key(n)).ratio(), n)
+             for n in names["name"]), reverse=True)[:3]
+        lines.append(f"    {len(names)} athletes on record for {school}; "
+                     f"closest names:")
+        for ratio, n in scored:
+            lines.append(f"      {ratio:.2f}  {n}")
     return "\n".join(lines)
 
 
