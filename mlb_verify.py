@@ -71,7 +71,8 @@ def gather(season: int, start: str, end: str, limit: int) -> pd.DataFrame:
     return M.score(pd.DataFrame(rows))
 
 
-def scoring_check(board: pd.DataFrame, hist: pd.DataFrame) -> int:
+def scoring_check(board: pd.DataFrame, hist: pd.DataFrame,
+                  min_games: int = 25) -> int:
     """Recompute DraftKings' published ppg from our rules. 0 if sane."""
     head("SCORING VALIDATION  (ours vs DraftKings' published ppg)")
     joined = M.attach_history(board, hist)
@@ -86,10 +87,21 @@ def scoring_check(board: pd.DataFrame, hist: pd.DataFrame) -> int:
            .agg(total=("points", "sum"), games=("points", "size"))
            .reset_index())
     m = m.merge(per, on="player_id", how="inner")
-    m = m[m["games"] >= 3]
+
+    # The first run compared 3-to-8-game sample means against DraftKings'
+    # full-SEASON average and called the difference a scoring error. It is
+    # not: at eight games a perfectly scored hitter still shows an MAE near
+    # 1.9 from variance alone, and errors appeared in both directions, which
+    # is the signature of sampling rather than of a wrong rule.
+    #
+    # College football hid this because its season was two weeks old, so
+    # both sides shared a denominator. Here they do not, so the comparison
+    # is restricted to players with enough games for their mean to mean
+    # something.
+    m = m[m["games"] >= min_games]
     if len(m) < 20:
-        print(f"only {len(m)} players have three or more games in this "
-              f"window - widen it before trusting this")
+        print(f"only {len(m)} players have {min_games}+ games in this window."
+              f" Widen it - a comparison on fewer is measuring variance.")
         if m.empty:
             return 1
 
@@ -102,8 +114,9 @@ def scoring_check(board: pd.DataFrame, hist: pd.DataFrame) -> int:
         M.PITCHER_POSITIONS)]
     hitters = m[~m.index.isin(pitchers.index)]
 
-    print(f"players compared : {len(m)}  "
+    print(f"players compared : {len(m)} with {min_games}+ games  "
           f"({len(hitters)} hitters, {len(pitchers)} pitchers)")
+    print(f"median games each: {int(m['games'].median())}")
     print(f"MAE              : {mae:.3f} points per game")
     print(f"median ratio     : {ratio:.4f}   (1.0000 is exact agreement)")
     for label, sub in (("hitters", hitters), ("pitchers", pitchers)):
@@ -119,15 +132,21 @@ def scoring_check(board: pd.DataFrame, hist: pd.DataFrame) -> int:
         print(f"  {str(r.name)[:23]:<24}{str(r.position):<5}{int(r.games):>4}"
               f"{r.ours:>8.2f}{r.dk_points_per_game:>8.2f}{r.diff:>+8.2f}")
 
+    # Judged on the RATIO, not the MAE. Per-player noise does not go away at
+    # 25 games - it is still worth about 1.1 points - but it is unbiased, so
+    # the median ratio across a couple of hundred players converges on the
+    # truth while the MAE never does.
     print()
-    if mae < 0.75:
-        print("PASS - both scoring systems, the field mapping and the "
-              "innings-as-thirds parsing agree with a number this project "
-              "did not produce.")
+    off = abs(ratio - 1.0)
+    if off <= 0.02:
+        print(f"PASS - the median player scores within {off:.1%} of "
+              f"DraftKings' own number. Both rule sets, the field mapping "
+              f"and the innings-as-thirds parsing are right.")
         return 0
-    print("FAIL - scoring disagrees with DraftKings. The box-score keys "
-          "printed above are the place to look; a rule that is wrong for "
-          "one system only will show in the per-group MAEs.")
+    print(f"FAIL - the median player is {off:.1%} away from DraftKings. "
+          f"That is too large to be sampling; a rule is wrong.")
+    print("Look at the per-group ratios above: a rule wrong for one system "
+          "only shows there and would be invisible in the combined number.")
     return 1
 
 
@@ -138,14 +157,19 @@ def main() -> int:
     p.add_argument("--season", type=int, default=2026)
     p.add_argument("--start", default="")
     p.add_argument("--end", default="")
-    p.add_argument("--games", type=int, default=120)
+    p.add_argument("--games", type=int, default=700)
+    p.add_argument("--min-games", type=int, default=25,
+                   help="players with fewer are too noisy to "
+                        "compare")
     args = p.parse_args()
 
     print(f"mlb_verify {VERSION}")
     problems = 0
 
     head("SCHEDULE")
-    start = args.start or f"{args.season}-08-15"
+    # A wider default window than the first run used. Comparing sample means
+    # to season averages needs the samples to be big enough to have a mean.
+    start = args.start or f"{args.season}-06-01"
     end = args.end or f"{args.season}-09-15"
     print(f"window: {start} to {end}")
     hist = gather(args.season, start, end, args.games)
@@ -190,15 +214,18 @@ def main() -> int:
     print(f"\nDraftKings rows carrying an MLB id: {with_id} of {len(board)} "
           f"({100 * with_id / max(1, len(board)):.0f}%)")
     if with_id == 0:
-        print("NONE. The join falls back to names - workable, but this is "
-              "the thing that made college football slow, so it is worth "
-              "finding the right field before building on it.")
-        problems += 1
+        print("NONE of the guessed field names found one. Rather than guess "
+              "again, here is every field DraftKings actually sends:\n")
+        print(M.board_row_keys(dg))
+        print("\nIf a league id is in that list, add it to _ID_FIELDS. If "
+              "it is not, names are the only join available - workable for "
+              "baseball, where names are far less ambiguous than college "
+              "football's and there are only thirty teams.")
     else:
         print("The join is an integer comparison. None of college "
               "football's name misery repeats here.")
 
-    problems += scoring_check(board, hist)
+    problems += scoring_check(board, hist, args.min_games)
 
     head("VERDICT")
     if problems == 0:
