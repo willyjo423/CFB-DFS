@@ -1,83 +1,102 @@
 name: MLB grade
 
-# Walk-forward: fit on everything strictly before a day, predict it, refit.
-# Hitters and pitchers graded SEPARATELY - neither is allowed to hide behind
-# the other. Reads the committed cache, never the network.
-
 on:
   workflow_dispatch:
     inputs:
       first_season:
-        description: "Earliest training season"
-        required: false
+        description: "Earliest season to train on"
         default: "2025"
       test_season:
         description: "Season to grade"
-        required: false
         default: "2026"
       first_day:
-        description: "Day of year to start (182 = 1 July)"
-        required: false
-        default: "196"
+        description: "First day of year to grade (182 = 1 July)"
+        default: "182"
       last_day:
-        description: "Day of year to stop (258 = 15 Sept)"
-        required: false
-        default: "251"
+        description: "Last day of year to grade (258 = 15 September)"
+        default: "258"
       every:
         description: "Grade every Nth day"
-        required: false
-        default: "14"
+        default: "7"
       quantiles:
-        description: "Blank for all six; 0.1,0.5,0.9 to run faster"
-        required: false
-        default: "0.1,0.5,0.9"
+        description: "Comma separated, e.g. 0.1,0.5,0.9 to run faster. Blank = full set."
+        default: ""
+
+permissions:
+  contents: write
 
 jobs:
   grade:
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 300
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: pip
+          python-version: "3.12"
 
-      - name: Install
-        run: pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Unit tests first
+      - name: Make the engine importable
+        run: |
+          echo "--- repo root ---"
+          ls -la
+          echo "--- engine/ ---"
+          ls -la engine 2>/dev/null || echo "(no engine directory)"
+
+          ENGINE_FILES="spec.py frame.py features.py model.py grade.py factors.py cache.py simulate.py ownership.py optimise.py"
+
+          mkdir -p engine
+          for f in $ENGINE_FILES; do
+            if [ -f "$f" ] && [ ! -f "engine/$f" ]; then
+              echo "  moving stray $f -> engine/$f"
+              mv "$f" "engine/$f"
+            fi
+          done
+
+          if [ ! -f engine/__init__.py ]; then
+            echo "  creating engine/__init__.py"
+            printf 'from .spec import SportSpec\nfrom . import frame, features\n\n__all__ = ["SportSpec", "frame", "features"]\n' > engine/__init__.py
+          fi
+
+          missing=""
+          for f in $ENGINE_FILES; do
+            [ -f "engine/$f" ] || missing="$missing $f"
+          done
+          if [ -n "$missing" ]; then
+            echo ""
+            echo "FATAL: these engine files are nowhere in this repo:$missing"
+            echo "Upload them into an engine/ folder and re-run."
+            exit 1
+          fi
+
+          python -c "import engine, engine.cache, engine.grade; print('engine imports OK')"
+
+      - name: What history is cached
+        run: ls -la data 2>/dev/null || echo "(no data directory - run MLB fetch history first)"
+
+      - name: Engine tests
         run: python test_engine.py
 
       - name: Grade
         run: |
-          ARGS="--first-season ${{ inputs.first_season }}"
-          ARGS="$ARGS --test-season ${{ inputs.test_season }}"
-          ARGS="$ARGS --first-day ${{ inputs.first_day }}"
-          ARGS="$ARGS --last-day ${{ inputs.last_day }}"
-          ARGS="$ARGS --every ${{ inputs.every }}"
-          if [ -n "${{ inputs.quantiles }}" ]; then
-            ARGS="$ARGS --quantiles ${{ inputs.quantiles }}"
-          fi
-          echo "EFFECTIVE ARGS: $ARGS"
-          python mlb_run_grade.py $ARGS 2>&1 | tee mlbgrade.txt
+          python mlb_run_grade.py \
+            --first-season "${{ inputs.first_season }}" \
+            --test-season "${{ inputs.test_season }}" \
+            --first-day "${{ inputs.first_day }}" \
+            --last-day "${{ inputs.last_day }}" \
+            --every "${{ inputs.every }}" \
+            --quantiles "${{ inputs.quantiles }}"
 
-      - name: Put it on the run page
-        if: always()
-        run: |
-          echo '## MLB grade' >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          tail -c 60000 mlbgrade.txt >> "$GITHUB_STEP_SUMMARY" || true
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Keep the output
+      - name: Keep the graded rows
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mlb-grade
-          path: |
-            mlbgrade.txt
-            mlb_graded_hitters.csv
-            mlb_graded_pitchers.csv
-          retention-days: 30
-          if-no-files-found: warn
+          name: mlb-graded
+          path: mlb_graded_*.csv
+          if-no-files-found: ignore
