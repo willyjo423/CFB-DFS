@@ -546,6 +546,56 @@ def test_swap_does_not_override_a_correct_forward_match():
                  "MINN": "Minnesota", "ORE": "Oregon"}, m
 
 
+def test_an_official_abbreviation_can_be_wrong():
+    """UL, exactly as the live run found it, and the opposite of last time.
+
+    CFBD's official abbreviation UL belongs to Louisiana. DraftKings used UL
+    for LOUISVILLE on this board. Both are real schools playing that week, so
+    nothing about the string settles it - and the alias tier, which exists to
+    be trusted, confidently proposed the wrong one.
+
+    The schedule settles it: SMU plays Louisville. An official alias is a
+    proposal like any other, and a proposal contradicted by the fixture list
+    loses. This is the second time this project has had UL wrong in opposite
+    directions, which is the argument for solving it from the schedule rather
+    than from any table of names.
+    """
+    board = pd.DataFrame([
+        {"game": "SMU @ UL", "team": "SMU", "opponent": "UL", "is_home": 0},
+    ])
+    games = [{"away_team": "SMU", "home_team": "Louisville"},
+             {"away_team": "UAB", "home_team": "Louisiana"},
+             {"away_team": "Louisiana", "home_team": "Charlotte"}]
+    teams = [{"school": s, "abbreviation": a} for s, a in [
+        ("SMU", "SMU"), ("Louisville", "LOU"), ("Louisiana", "UL"),
+        ("UAB", "UAB"), ("Charlotte", "CLT")]]
+    m = D.fixture_team_map(board, games, teams)
+    assert m.get("SMU") == "SMU", m
+    assert m.get("UL") == "Louisville", m
+
+
+def test_relaxation_refuses_when_both_relaxations_disagree():
+    """If either side alone determines a different game, that is ambiguity.
+
+    Relaxing the away code points at one fixture, relaxing the home code
+    points at another. Picking either would be a coin flip dressed as a
+    deduction, and a wrong team code hands every player on it the wrong
+    opponent and the wrong implied total.
+    """
+    board = pd.DataFrame([
+        {"game": "AA @ BB", "team": "AA", "opponent": "BB", "is_home": 0},
+    ])
+    # AA proposes only Michigan, BB proposes only Oregon, and neither of
+    # those two plays the other - but each determines a different game.
+    games = [{"away_team": "Michigan", "home_team": "Ohio State"},
+             {"away_team": "Minnesota", "home_team": "Oregon"}]
+    teams = [{"school": s, "abbreviation": a} for s, a in [
+        ("Michigan", "AA"), ("Ohio State", "OSU"),
+        ("Minnesota", "MINN"), ("Oregon", "BB")]]
+    m = D.fixture_team_map(board, games, teams)
+    assert not m, f"should have refused, got {m}"
+
+
 def test_relaxation_does_not_invent_a_mapping():
     """The relaxation must not turn 'no answer' into 'any answer'.
 
