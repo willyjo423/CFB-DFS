@@ -452,7 +452,8 @@ def fantasy_points(df: pd.DataFrame) -> pd.Series:
 
 
 def season_history(key: str, season: int, through_week: int,
-                   positions: pd.DataFrame | None = None) -> pd.DataFrame:
+                   positions: pd.DataFrame | None = None,
+                   require_position: bool = False) -> pd.DataFrame:
     """Every settled game in a season, scored, with positions attached.
 
     `through_week` is inclusive of the last PLAYED week. Callers predicting
@@ -487,11 +488,24 @@ def season_history(key: str, season: int, through_week: int,
     out = out.merge(positions[["athlete_id", "position"]],
                     on="athlete_id", how="left")
     unplaced = int(out["position"].isna().sum())
-    out = out.dropna(subset=["position"])
-    log.info("%d: %d player-games, %d athletes, dropped %d without a "
-             "position (%.1f%%), points %.1f to %.1f",
+
+    # Dropping unpositioned rows here was a real mistake, and an expensive
+    # one: it deleted 9% of 2026 and then the join reported those players as
+    # missing history. They had history. This function threw it away.
+    #
+    # A position is needed to FIT the model - position features, position
+    # baselines, position-restricted grading. It is needed for none of the
+    # other things history is used for, and DraftKings supplies a position
+    # for every player it prices, so the live board never needs CFBD's.
+    #
+    # So the filter moved to the one caller that requires it.
+    if require_position:
+        out = out.dropna(subset=["position"])
+    log.info("%d: %d player-games, %d athletes, %d without a position "
+             "(%.1f%%, %s), points %.1f to %.1f",
              season, len(out), out["athlete_id"].nunique(), unplaced,
              100 * unplaced / max(1, before),
+             "dropped" if require_position else "kept",
              out["points"].min(), out["points"].max())
 
     out["key"] = out["name"].map(primary_key)
@@ -501,7 +515,8 @@ def season_history(key: str, season: int, through_week: int,
 
 def training_history(key: str, first: int, last: int,
                      through_week: dict[int, int] | None = None,
-                     skip_covid: bool = True) -> pd.DataFrame:
+                     skip_covid: bool = True,
+                     require_position: bool = False) -> pd.DataFrame:
     """Several seasons, concatenated, for fitting.
 
     2020 is excluded by default. It is not a thin season - it is a different
@@ -520,7 +535,8 @@ def training_history(key: str, first: int, last: int,
             weeks = through_week.get(season)
             if weeks is None:
                 weeks = live_week(key, season) if season == last else 15
-            frames.append(season_history(key, season, weeks, positions))
+            frames.append(season_history(key, season, weeks, positions,
+                                         require_position=require_position))
         except Unavailable as exc:
             log.warning("season %d skipped: %s", season, exc)
     if not frames:
@@ -554,8 +570,60 @@ def attach_history(board_df: pd.DataFrame, hist: pd.DataFrame
         matched.append(hit)
     out = board_df.copy()
     out["athlete_id"] = matched
+    strict = int(out["athlete_id"].notna().sum())
+
+    # Second pass for the one difference the exact keys cannot absorb: a
+    # middle name or initial present on one side only. "Tyler J. Williams" on
+    # the board is "Tyler Williams" in CFBD, and no exact reduction bridges
+    # that, because deleting a middle token is not a spelling difference.
+    #
+    # Dropping middles is therefore allowed ONLY when it is unambiguous. The
+    # reduced key must identify exactly one athlete in the whole history; a
+    # college roster has enough Williamses that a reduced key matching two
+    # people is a coin flip, and a coin flip attached to a real salary is
+    # worse than a miss. Ambiguous ones stay unmatched, deliberately.
+    # The reduction is applied to BOTH sides. A first version reduced only
+    # history keys of three or more parts, which is exactly the side that
+    # usually has two - "Tyler Williams" in CFBD, "Tyler J. Williams" on the
+    # board - so the index it built never contained the name being looked up.
+    # It also made the ambiguous case pass by accident, because only one of
+    # the two colliding athletes was ever indexed.
+    def _short(k: str) -> str | None:
+        parts = k.split()
+        return f"{parts[0]} {parts[-1]}" if len(parts) >= 2 else None
+
+    reduced: dict[str, set[str]] = {}
+    for athlete, keys in zip(hist["athlete_id"], hist["keys"]):
+        for k in keys:
+            s = _short(k)
+            if s:
+                reduced.setdefault(s, set()).add(athlete)
+    unique = {k: next(iter(v)) for k, v in reduced.items() if len(v) == 1}
+
+    ambiguous = 0
+    col = out.columns.get_loc("athlete_id")
+    for i, (aid, keys) in enumerate(zip(out["athlete_id"], out["keys"])):
+        if aid is not None:
+            continue
+        for k in keys:
+            short = _short(k)
+            if not short:
+                continue
+            if short in unique:
+                out.iloc[i, col] = unique[short]
+                break
+            if short in reduced:
+                ambiguous += 1
+                break
 
     n = int(out["athlete_id"].notna().sum())
+    if n > strict:
+        log.info("join: %d extra matched by dropping a middle name, each "
+                 "unambiguous in the full history", n - strict)
+    if ambiguous:
+        log.info("join: %d left unmatched because dropping the middle name "
+                 "matched more than one athlete - a guess there is worse "
+                 "than a miss", ambiguous)
     log.info("join: %d of %d priced players matched to history (%.1f%%)",
              n, len(out), 100 * n / max(1, len(out)))
     return out
@@ -901,12 +969,24 @@ def fixture_team_map(board_df: pd.DataFrame, games: list[dict],
             # the fetched weeks at all". Both look like an unsolved fixture
             # and they need completely different fixes: the first is a naming
             # rule, the second is a wider week window.
-            pair = [s for code in (away_code, home_code)
-                    for s in schools if proposes(code, s)]
-            together = [(a, h) for a, h in cfbd_fixtures
-                        if a in pair or h in pair]
-            if not together:
-                log.warning("  neither code's schools appear in ANY fetched "
+            # Print what each proposed school is ACTUALLY doing that week.
+            # Absence of a pairing has several causes that look identical -
+            # wrong week, wrong code, neutral site - and listing the real
+            # fixtures distinguishes them in one line instead of one run.
+            any_seen = False
+            for code in (away_code, home_code):
+                for s in sorted(x for x in schools if proposes(code, x))[:2]:
+                    real = [f"{a} @ {h}" for a, h in cfbd_fixtures
+                            if a == s or h == s]
+                    if real:
+                        any_seen = True
+                        log.warning("    %s (%s) actually plays: %s",
+                                    code, s, "; ".join(real[:3]))
+                    else:
+                        log.warning("    %s (%s) plays in NO fetched fixture",
+                                    code, s)
+            if not any_seen:
+                log.warning("  no proposed school appears in ANY fetched "
                             "fixture - widen the week window")
     log.info("team map: %d codes solved from %d fixtures",
              len(mapping), len(dk_fixtures))
