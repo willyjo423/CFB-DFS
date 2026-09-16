@@ -281,6 +281,93 @@ def test_diagnose_misses_separates_the_causes():
     assert "SCHOOL UNMAPPED" in text2, text2
 
 
+# Every real miss from the live 2026 week-3 run, with the closest name the
+# history actually held for that man's school. This is not a hypothetical
+# fixture - it is the diagnostic output, transcribed.
+LIVE_MISSES = [
+    # (board name, school, cfbd name, must match?, why)
+    ("Matt Fuller", "South Carolina", "Matthew Fuller", True, "short form"),
+    ("Benji Blackburn", "Stanford", "Benjamin Blackburn", True, "short form"),
+    ("Zacharyus Williams", "USC", "Zach Williams", True, "short form"),
+    ("Maxence LeBlanc", "Ohio State", "Max LeBlanc", True, "short form"),
+    ("Ryan Coleman-Williams", "Alabama", "Ryan Williams", True, "compound"),
+    ("Sacovie White-Helton", "Georgia", "Sacovie White", True, "compound"),
+    ("Micah Riley", "Texas A&M", "Micah Riley-Ducker", True, "compound"),
+    ("Collin Remenowsky", "Utah State", "Collin Remenowksy", True, "typo"),
+    # These must NOT match. Each is a different man or a genuine unknown.
+    ("Mason King", "Kent State", "Stanley King", False, "different person"),
+    ("Quintrevion Wisner", "Florida State", "Tre Wisner", False, "nickname"),
+    ("Terrence McWilliams Jr.", "Louisville", "T.J. McWilliams", False,
+     "initials"),
+]
+
+
+def test_every_live_miss_resolves_as_measured():
+    """The eight fixable misses fix, and the three unfixable ones stay out.
+
+    Three rounds were spent guessing at why these missed - the position
+    filter, then national name ambiguity - and fixing the guess. Printing
+    what the history actually held for each man's school answered it in one
+    run: every single one was a name-form difference, in four shapes.
+    """
+    for board_name, school, cfbd_name, should, why in LIVE_MISSES:
+        board = pd.DataFrame([{"name": board_name, "salary": 4000,
+                               "position": "WR", "team": "T",
+                               "dk_points_per_game": 9.0}])
+        board["keys"] = board["name"].map(D.name_keys)
+        hist = pd.DataFrame([{"athlete_id": "x", "name": cfbd_name,
+                              "school": school}])
+        hist["keys"] = hist["name"].map(D.name_keys)
+        got = D.attach_history(board, hist,
+                               team_map={"T": school})["athlete_id"].iloc[0]
+        matched = got == "x"
+        assert matched is should, (
+            f"{board_name} vs {cfbd_name} ({why}): "
+            f"{'should have matched' if should else 'should NOT have matched'}")
+
+
+def test_first_name_prefix_rule_separates_the_real_cases():
+    """The rule's own evidence: short forms share 3+, wrong pairs share <=1."""
+    for a, b in [("matt", "matthew"), ("benji", "benjamin"),
+                 ("zacharyus", "zach"), ("maxence", "max")]:
+        assert D.first_names_compatible(a, b), (a, b)
+    for a, b in [("mason", "stanley"), ("quintrevion", "tre"),
+                 ("terrence", "tj"), ("ryan", "roydell")]:
+        assert not D.first_names_compatible(a, b), (a, b)
+
+
+def test_two_men_of_one_name_on_one_roster_still_refuse():
+    """Tyler J. Williams. Georgia had two Tyler Williamses, both 0.93.
+
+    A school restriction narrows the pool; it does not make a coin flip safe.
+    """
+    board = pd.DataFrame([{"name": "Tyler J. Williams", "salary": 3000,
+                           "position": "WR", "team": "UGA",
+                           "dk_points_per_game": 2.7}])
+    board["keys"] = board["name"].map(D.name_keys)
+    hist = pd.DataFrame([
+        {"athlete_id": "a", "name": "Tyler Williams", "school": "Georgia"},
+        {"athlete_id": "b", "name": "Tyler Williams", "school": "Georgia"},
+    ])
+    hist["keys"] = hist["name"].map(D.name_keys)
+    got = D.attach_history(board, hist, team_map={"UGA": "Georgia"})
+    assert got["athlete_id"].iloc[0] is None, got["athlete_id"].iloc[0]
+
+
+def test_form_matching_never_crosses_schools():
+    """Matthew Fuller at another school must not rescue Matt Fuller here."""
+    board = pd.DataFrame([{"name": "Matt Fuller", "salary": 4900,
+                           "position": "RB", "team": "SCAR",
+                           "dk_points_per_game": 17.9}])
+    board["keys"] = board["name"].map(D.name_keys)
+    hist = pd.DataFrame([{"athlete_id": "x", "name": "Matthew Fuller",
+                          "school": "Clemson"}])
+    hist["keys"] = hist["name"].map(D.name_keys)
+    got = D.attach_history(board, hist,
+                           team_map={"SCAR": "South Carolina"})
+    assert got["athlete_id"].iloc[0] is None, got["athlete_id"].iloc[0]
+
+
 def test_join_matches_across_spellings():
     board = pd.DataFrame([{"name": "AJ Swann", "salary": 8500,
                            "position": "QB", "team": "ARK"}])
