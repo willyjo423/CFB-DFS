@@ -232,14 +232,28 @@ def main() -> int:
     joined_deep = D.attach_history(board, deep)
     print()
     print(D.join_quality(joined_deep))
+    # Gated on real misses, not raw rate. An earlier version demanded 90% of
+    # the board and failed at 59.4%, which measured the wrong thing: most of
+    # a college board is third-string players DraftKings itself scores at
+    # 0.0. The question is whether we lost anyone who has actually produced.
     rate = joined_deep["athlete_id"].notna().mean()
+    bad = D.real_misses(joined_deep)
     print()
-    if rate >= 0.90:
-        print(f"PASS - {rate:.1%} of the priced board has history to project "
-              f"from.")
+    print(f"raw match rate         : {rate:.1%} "
+          f"(most of the rest are backups with no snaps)")
+    print(f"unmatched WITH scoring : {len(bad)}")
+    if bad.empty:
+        print("\nPASS - every player DraftKings credits with production has "
+              "history to project from.")
+    elif len(bad) <= 5:
+        print(f"\nPASS with {len(bad)} exception(s) - small enough to drop "
+              f"rather than guess, but worth a look:")
+        for r in bad.itertuples(index=False):
+            print(f"    {str(r.name)[:26]:<27}{r.team:<6}"
+                  f"{float(r.dk_points_per_game):>6.1f} ppg")
     else:
-        print(f"FAIL - only {rate:.1%} of the board has any history. "
-              f"Projections would be guesses for the rest.")
+        print(f"\nFAIL - {len(bad)} players have published production and no "
+              f"matched history. The join is losing real players.")
         problems += 1
 
     head("VERDICT")
