@@ -210,20 +210,34 @@ def main() -> int:
     print(board[["name", "position", "team", "opponent", "salary",
                  "mlb_id", "dk_points_per_game"]].head(12).to_string(
                      index=False))
-    with_id = int(board["mlb_id"].notna().sum())
-    print(f"\nDraftKings rows carrying an MLB id: {with_id} of {len(board)} "
-          f"({100 * with_id / max(1, len(board)):.0f}%)")
-    if with_id == 0:
-        print("NONE of the guessed field names found one. Rather than guess "
-              "again, here is every field DraftKings actually sends:\n")
+    # Whether a field is POPULATED and whether it JOINS are different
+    # questions, and the first run answered the wrong one: 179 of 278 rows
+    # carried a number, and not one of them matched a real MLB id. Blake
+    # Snell came back as 10148; his league id is six digits. Those are
+    # DraftKings' own player ids.
+    #
+    # This is the same mistake as counting blank positions as matches in the
+    # football build, so it is measured the way it should have been: by how
+    # many rows actually found history.
+    joined = M.attach_history(board, hist)
+    by_id = int((joined["matched_by"] == "id").sum())
+    by_name = int((joined["matched_by"] == "name").sum())
+    populated = int(board["mlb_id"].notna().sum())
+    print(f"\nrows carrying something in an id field : {populated} of "
+          f"{len(board)}")
+    print(f"rows that actually matched BY that id  : {by_id}")
+    print(f"rows matched by name                   : {by_name}")
+    if by_id == 0:
+        print("\nThe id fields are DraftKings' own, not the league's. Names "
+              "are the join.")
+        print("That is workable here in a way it was not for college "
+              "football: thirty teams, unique names, and no A.J./AJ problem.")
+        print("\nEvery field DraftKings actually sends, in case a league id "
+              "is among them:\n")
         print(M.board_row_keys(dg))
-        print("\nIf a league id is in that list, add it to _ID_FIELDS. If "
-              "it is not, names are the only join available - workable for "
-              "baseball, where names are far less ambiguous than college "
-              "football's and there are only thirty teams.")
     else:
-        print("The join is an integer comparison. None of college "
-              "football's name misery repeats here.")
+        print(f"\n{by_id} rows join on a league id - an integer comparison, "
+              f"no name matching needed for those.")
 
     problems += scoring_check(board, hist, args.min_games)
 
