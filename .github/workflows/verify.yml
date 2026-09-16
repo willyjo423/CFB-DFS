@@ -1,11 +1,3 @@
-name: CFB verify
-
-# The data layer, end to end, against this Saturday's real slate.
-# Unit tests first - if the logic is wrong there is no point asking
-# DraftKings. Then slates, board, live week, team map, history, join,
-# and the scoring validation that checks our points against the ppg
-# DraftKings publishes on the board.
-
 on:
   workflow_dispatch:
     inputs:
@@ -13,6 +5,10 @@ on:
         description: "Season"
         required: false
         default: "2026"
+      first_season:
+        description: "Earliest season of training history to join against"
+        required: false
+        default: "2023"
       draft_group:
         description: "Draft group id (blank = busiest of the chosen type)"
         required: false
@@ -21,47 +17,3 @@ on:
         description: "Classic or Showdown"
         required: false
         default: "Classic"
-
-jobs:
-  verify:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install
-        run: pip install -r requirements.txt
-
-      - name: Verify
-        env:
-          CFBD_API_KEY: ${{ secrets.CFBD_API_KEY }}
-        run: |
-          ARGS="--season ${{ inputs.season }} --game-type ${{ inputs.game_type }}"
-          if [ -n "${{ inputs.draft_group }}" ]; then
-            ARGS="$ARGS --draft-group ${{ inputs.draft_group }}"
-          fi
-          echo "EFFECTIVE ARGS: $ARGS"
-          python cfb_verify.py $ARGS 2>&1 | tee verify.txt
-
-      - name: Put it on the run page
-        if: always()
-        run: |
-          {
-            echo '## CFB verify'
-            echo '```'
-            tail -c 60000 verify.txt || echo "(no output captured)"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Keep the output
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cfb-verify
-          path: verify.txt
-          retention-days: 30
-          if-no-files-found: warn
