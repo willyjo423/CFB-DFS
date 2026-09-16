@@ -48,9 +48,27 @@ def head(t: str) -> None:
 def gather(season: int, start: str, end: str, limit: int) -> pd.DataFrame:
     """Box scores for a window of finished games."""
     sched = M.schedule(season, start, end)
-    final = sched[sched["final"]].head(limit)
+    done = sched[sched["final"]]
+    # EVENLY SPACED across the window, never the first N.
+    #
+    # `.head(limit)` took the first 700 games chronologically, so every row
+    # came from June 1 to July 26 - and that block was then compared against
+    # DraftKings' FULL-SEASON points per game. Not like for like, and the gap
+    # it produced looked exactly like a scoring error. It was the third time
+    # this one check measured its own methodology instead of the code.
+    #
+    # Spacing the sample across the whole window makes the comparison honest
+    # and stays deterministic, which random sampling would not.
+    if limit >= len(done):
+        final = done
+    else:
+        idx = np.linspace(0, len(done) - 1, limit).round().astype(int)
+        final = done.iloc[np.unique(idx)]
     print(f"{len(sched)} games in window, {int(sched['final'].sum())} final, "
-          f"pulling {len(final)}")
+          f"pulling {len(final)} spread evenly across it")
+    if len(final):
+        print(f"sampled dates run {final['date'].min()} to "
+              f"{final['date'].max()}")
     rows, shown = [], False
     for i, g in enumerate(final.to_dict("records"), 1):
         try:
