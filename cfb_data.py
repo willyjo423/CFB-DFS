@@ -317,6 +317,34 @@ def live_week(key: str, season: int) -> int:
     return played
 
 
+def upcoming_games(key: str, season: int, after_week: int,
+                   span: int = 2) -> list[dict]:
+    """The schedule a slate might draw from, not one week of it.
+
+    DraftKings builds a Saturday slate from kickoffs, not from CFBD's week
+    numbering, and the two do not always agree - a Friday or a late-window
+    game can sit in the next week's bucket. Fetching one week left SMU @
+    Louisiana unresolvable even though both codes proposed exactly the right
+    school: the fixture simply was not in the list being searched.
+    """
+    out, seen = [], set()
+    for week in range(after_week + 1, after_week + 1 + span):
+        try:
+            games = cfbd("games", key, year=season, week=week,
+                         seasonType="regular")
+        except Unavailable as exc:
+            log.warning("week %d schedule unavailable: %s", week, exc)
+            continue
+        for g in games or []:
+            gid = g.get("id")
+            if gid not in seen:
+                seen.add(gid)
+                out.append(g)
+    log.info("schedule window: weeks %d-%d, %d games",
+             after_week + 1, after_week + span, len(out))
+    return out
+
+
 def roster_positions(key: str, season: int) -> pd.DataFrame:
     """athlete_id -> position for a season.
 
@@ -630,6 +658,16 @@ def team_aliases(teams: list[dict]) -> tuple[dict, dict]:
                          _clean_code(first[:3] + "st"),
                          _clean_code("u" + first[0]),
                          _clean_code(first)})
+        # Two-token schools get truncated per token: Utah State -> UTST.
+        # "UT Martin" reaches UTST through first[:4] + "st" above, so this
+        # code is claimed by several schools and none of them officially -
+        # which is exactly the situation the zero-candidate relaxation in
+        # fixture_team_map exists to recover from.
+        if len(meaningful) >= 2:
+            a, b = meaningful[0], meaningful[1]
+            for n in (1, 2, 3, 4):
+                weak.add(_clean_code(a[:n] + b[:2]))
+                weak.add(_clean_code(a[:n] + b[0]))
 
         official[school] = {c for c in strong if c}
         constructed[school] = {c for c in weak if c} - official[school]
@@ -717,24 +755,68 @@ def fixture_team_map(board_df: pd.DataFrame, games: list[dict],
             return False                  # another code already claimed it
         return code in free or proposes(code, school)
 
-    unsolved = list(dk_fixtures)
-    for _ in range(len(dk_fixtures) + 1):
-        progressed = False
-        still = []
-        for away_code, home_code in unsolved:
-            cands = [(a, h) for a, h in cfbd_fixtures
-                     if compatible(away_code, a) and compatible(home_code, h)]
-            if len(cands) == 1:
-                a, h = cands[0]
-                if mapping.get(away_code, a) == a and \
-                   mapping.get(home_code, h) == h:
-                    mapping[away_code], mapping[home_code] = a, h
-                    progressed = True
-                    continue
-            still.append((away_code, home_code))
-        unsolved = still
-        if not progressed:
+    def candidates(away_code: str, home_code: str) -> list:
+        return [(a, h) for a, h in cfbd_fixtures
+                if compatible(away_code, a) and compatible(home_code, h)]
+
+    def run(pending: list) -> list:
+        for _ in range(len(pending) + 1):
+            progressed = False
+            still = []
+            for away_code, home_code in pending:
+                cands = candidates(away_code, home_code)
+                if len(cands) == 1:
+                    a, h = cands[0]
+                    if mapping.get(away_code, a) == a and \
+                       mapping.get(home_code, h) == h:
+                        mapping[away_code], mapping[home_code] = a, h
+                        progressed = True
+                        continue
+                still.append((away_code, home_code))
+            pending = still
+            if not progressed:
+                break
+        return pending
+
+    unsolved = run(list(dk_fixtures))
+
+    # A fixture with ZERO candidates is not ambiguous - it is misinformed.
+    # Every school its codes propose is wrong, which is strictly worse than
+    # proposing nothing, because proposing nothing earns the free treatment
+    # that solved BAMA and this does not.
+    #
+    # UTST is the case. "UT Martin" builds UTST from its first token and Utah
+    # Tech from its initials, while Utah State builds USST and UTAHST and
+    # never UTST. So UTST confidently proposed four schools, none of them the
+    # right one, and no fixture could contain any of them opposite Utah.
+    #
+    # Rather than chase every shortening DraftKings might invent, discard the
+    # proposals that produced nothing and let the fixture decide, which is
+    # what it is for.
+    for _ in range(3):
+        stuck = [fx for fx in unsolved if not candidates(*fx)]
+        if not stuck:
             break
+        # Relax ONLY the ambiguous side. A first version relaxed both codes
+        # in a stuck fixture and solved strictly nothing: freeing UTAH along
+        # with UTST threw away the single good constraint and turned zero
+        # candidates into three. A code proposing exactly one school is
+        # probably right and is kept; a code proposing several is the one
+        # that put the fixture in this state.
+        relaxed = set()
+        for fx in stuck:
+            for c in fx:
+                if c in mapping or c in free:
+                    continue
+                if sum(1 for s in schools if proposes(c, s)) != 1:
+                    relaxed.add(c)
+        if not relaxed:
+            break
+        log.info("no candidate fixture for %d pairing(s); relaxing %s to be "
+                 "solved by opponent alone", len(stuck),
+                 ", ".join(sorted(relaxed)))
+        free |= relaxed
+        unsolved = run(unsolved)
 
     if unsolved:
         log.warning("%d fixtures did not resolve to exactly one CFBD game: %s",
@@ -754,6 +836,17 @@ def fixture_team_map(board_df: pd.DataFrame, games: list[dict],
                 else:
                     log.warning("  %s proposes %d: %s", code, len(hits),
                                 ", ".join(hits[:5]))
+            # Distinguish "the proposals are wrong" from "the game is not in
+            # the fetched weeks at all". Both look like an unsolved fixture
+            # and they need completely different fixes: the first is a naming
+            # rule, the second is a wider week window.
+            pair = [s for code in (away_code, home_code)
+                    for s in schools if proposes(code, s)]
+            together = [(a, h) for a, h in cfbd_fixtures
+                        if a in pair or h in pair]
+            if not together:
+                log.warning("  neither code's schools appear in ANY fetched "
+                            "fixture - widen the week window")
     log.info("team map: %d codes solved from %d fixtures",
              len(mapping), len(dk_fixtures))
     return mapping
