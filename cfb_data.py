@@ -568,11 +568,76 @@ def join_quality(joined: pd.DataFrame) -> str:
 
 # ------------------------------------------------------------------ fixtures
 
+_STOP = {"of", "the", "at", "and"}
+
+
 def _tokens(school: str) -> list[str]:
-    return [t for t in re.split(r"[^a-z0-9]+", str(school).lower()) if t]
+    return [t for t in re.split(r"[^a-z0-9&]+", str(school).lower()) if t]
 
 
-def fixture_team_map(board_df: pd.DataFrame, games: list[dict]) -> dict:
+def _clean_code(code) -> str:
+    return re.sub(r"[^A-Z0-9&]", "", str(code).upper())
+
+
+def team_aliases(teams: list[dict]) -> tuple[dict, dict]:
+    """(official, constructed) code sets per school.
+
+    CFBD's teams endpoint publishes an abbreviation and up to three alternate
+    names, and those carry the codes no rule can derive: Georgia's
+    abbreviation is literally UGA, which is not a prefix, a substring or an
+    initialism of "Georgia". An earlier version worked from school names alone
+    and mapped 6 of 24 codes; the difference is entirely this endpoint.
+
+    The two tiers exist because guessing pollutes. Constructing "initials + U"
+    gives Kentucky -> KU, and constructing "U + first letter" gives Kansas ->
+    UK, so each code proposes both schools and the two fixtures deadlock, each
+    waiting on the other to resolve first. CFBD's official abbreviations say
+    Kentucky is UK and Kansas is KU with no ambiguity at all.
+
+    So a code that any school claims OFFICIALLY is matched only against
+    official sets. Constructed forms - CLEM, STAN, MSST - are consulted only
+    for codes no school officially claims, where a guess is all there is.
+    """
+    official: dict[str, set[str]] = {}
+    constructed: dict[str, set[str]] = {}
+    for t in teams or []:
+        school = t.get("school")
+        if not school:
+            continue
+        toks = _tokens(school)
+        flat = "".join(toks)
+
+        strong = set()
+        for field in ("abbreviation", "alt_name1", "alt_name2", "alt_name3",
+                      "altName1", "altName2", "altName3"):
+            v = t.get(field)
+            if v:
+                strong.add(_clean_code(v))
+        strong.add(_clean_code(flat))          # the school's own name
+
+        weak = set()
+        for n in (2, 3, 4, 5, 6):
+            if len(flat) >= n:
+                weak.add(_clean_code(flat[:n]))
+        meaningful = [x for x in toks if x not in _STOP]
+        initials = "".join(x[0] for x in meaningful)
+        if initials:
+            weak.update({_clean_code(initials), _clean_code(initials + "u"),
+                         _clean_code(initials + "st")})
+        if meaningful:
+            first = meaningful[0]
+            weak.update({_clean_code(first[:4] + "st"),
+                         _clean_code(first[:3] + "st"),
+                         _clean_code("u" + first[0]),
+                         _clean_code(first)})
+
+        official[school] = {c for c in strong if c}
+        constructed[school] = {c for c in weak if c} - official[school]
+    return official, constructed
+
+
+def fixture_team_map(board_df: pd.DataFrame, games: list[dict],
+                     teams: list[dict] | None = None) -> dict:
     """DraftKings team code -> CFBD school, solved from the schedule.
 
     A hand-written map is twenty-four guesses that look like knowledge, and at
@@ -605,17 +670,40 @@ def fixture_team_map(board_df: pd.DataFrame, games: list[dict]) -> dict:
             cfbd_fixtures.append((str(away), str(home)))
     schools = {s for fx in cfbd_fixtures for s in fx}
 
+    # Aliases from CFBD when available, school names alone otherwise. The
+    # fallback works - it solved 6 of 24 - which is exactly why it is not
+    # silent about being the fallback.
+    official, constructed = team_aliases(teams) if teams else ({}, {})
+    official = {s: a for s, a in official.items() if s in schools}
+    constructed = {s: a for s, a in constructed.items() if s in schools}
+    claimed = {c for codes in official.values() for c in codes}
+    if teams:
+        log.info("aliases for %d of %d scheduled schools, %d official codes",
+                 len(official), len(schools), len(claimed))
+    else:
+        log.warning("no teams payload - falling back to name matching alone, "
+                    "which maps roughly a quarter of DraftKings' codes")
+
+    def proposes(code: str, school: str) -> bool:
+        c = _clean_code(code)
+        if not official:
+            return _overlap(code, school)
+        # A code some school claims officially is matched ONLY officially.
+        if c in claimed:
+            return c in official.get(school, set())
+        return c in constructed.get(school, set())
+
     dk_fixtures = []
     for game in (board_df.dropna(subset=["game"])["game"].drop_duplicates()):
         away_code, _, home_code = str(game).partition(" @ ")
         if away_code.strip() and home_code.strip():
             dk_fixtures.append((away_code.strip(), home_code.strip()))
 
-    # A code is "free" when no school in this week's schedule resembles it.
-    # UL is free; LOU is not, because it resembles both Louisiana and
-    # Louisville and must stay confined to those two.
+    # A code is "free" when nothing in this week's schedule proposes it. UL is
+    # free - University of Louisiana shares no letters with "Louisiana" - and
+    # the fixture resolves it from the other side.
     free = {code for fx in dk_fixtures for code in fx
-            if not any(_overlap(code, s) for s in schools)}
+            if not any(proposes(code, s) for s in schools)}
     if free:
         log.info("codes no string rule can propose, left to the fixtures: %s",
                  ", ".join(sorted(free)))
@@ -627,7 +715,7 @@ def fixture_team_map(board_df: pd.DataFrame, games: list[dict]) -> dict:
             return mapping[code] == school
         if school in mapping.values():
             return False                  # another code already claimed it
-        return code in free or _overlap(code, school)
+        return code in free or proposes(code, school)
 
     unsolved = list(dk_fixtures)
     for _ in range(len(dk_fixtures) + 1):
@@ -652,6 +740,20 @@ def fixture_team_map(board_df: pd.DataFrame, games: list[dict]) -> dict:
         log.warning("%d fixtures did not resolve to exactly one CFBD game: %s",
                     len(unsolved),
                     ", ".join(f"{a} @ {h}" for a, h in unsolved[:6]))
+        # Say WHY, per code, rather than leaving the next run to guess. A code
+        # proposing zero schools is a missing alias; one proposing several is
+        # a fixture the schedule could not narrow.
+        for away_code, home_code in unsolved[:8]:
+            for code in (away_code, home_code):
+                if code in mapping:
+                    continue
+                hits = sorted(s for s in schools if proposes(code, s))
+                if not hits:
+                    log.warning("  %s proposes nothing (treated as free)",
+                                code)
+                else:
+                    log.warning("  %s proposes %d: %s", code, len(hits),
+                                ", ".join(hits[:5]))
     log.info("team map: %d codes solved from %d fixtures",
              len(mapping), len(dk_fixtures))
     return mapping
