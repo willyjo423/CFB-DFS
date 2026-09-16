@@ -1,107 +1,104 @@
-name: MLB fetch history
+"""Download seasons of box scores into the cache, once, and stop.
 
-on:
-  workflow_dispatch:
-    inputs:
-      seasons:
-        description: "Seasons to fetch, space separated"
-        default: "2025 2026"
-      refresh:
-        description: "Seasons to re-fetch even if already cached"
-        default: ""
-      limit:
-        description: "Cap games per season (0 = all). Use 50 for a smoke test."
-        default: "0"
+A season is about 2,430 games and each needs its own box score, so this is
+roughly twelve minutes of HTTP per season. That is exactly why it is cached
+and committed rather than paid on every run.
 
-permissions:
-  contents: write
+Deliberately conservative about failure, because the college football build
+lost five minutes of downloading to a quota error that discarded everything
+fetched before it:
 
-jobs:
-  fetch:
-    runs-on: ubuntu-latest
-    timeout-minutes: 300
+  * a season already on disk is skipped unless explicitly refreshed;
+  * each season is written as soon as it completes, not at the end, so a
+    failure on season three keeps seasons one and two;
+  * a run that dies partway leaves the cache strictly better than it found
+    it, and re-running picks up only what is missing.
+"""
 
-    steps:
-      - uses: actions/checkout@v4
+from __future__ import annotations
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+import argparse
+import logging
+import time
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+import pandas as pd
 
-      - name: Make the engine importable
-        run: |
-          echo "--- repo root ---"
-          ls -la
-          echo "--- engine/ ---"
-          ls -la engine 2>/dev/null || echo "(no engine directory)"
+import mlb_data as M
+from engine import cache as C
 
-          ENGINE_FILES="spec.py frame.py features.py model.py grade.py factors.py cache.py simulate.py ownership.py optimise.py"
+SPORT = "mlb"
 
-          mkdir -p engine
-          for f in $ENGINE_FILES; do
-            if [ -f "$f" ] && [ ! -f "engine/$f" ]; then
-              echo "  moving stray $f -> engine/$f"
-              mv "$f" "engine/$f"
-            fi
-          done
 
-          if [ ! -f engine/__init__.py ]; then
-            echo "  creating engine/__init__.py"
-            printf 'from .spec import SportSpec\nfrom . import frame, features\n\n__all__ = ["SportSpec", "frame", "features"]\n' > engine/__init__.py
-          fi
+def fetch_season(season: int, limit: int = 0, pause: float = 0.10
+                 ) -> pd.DataFrame:
+    """Every finished game of a season, as scored player-rows."""
+    sched = M.schedule(season)
+    done = sched[sched["final"]]
+    if limit:
+        done = done.head(limit)
+    print(f"{season}: {len(sched)} games, {len(done)} final, pulling them")
 
-          missing=""
-          for f in $ENGINE_FILES; do
-            [ -f "engine/$f" ] || missing="$missing $f"
-          done
-          if [ -n "$missing" ]; then
-            echo ""
-            echo "FATAL: these engine files are nowhere in this repo:$missing"
-            echo "Upload them into an engine/ folder and re-run."
-            exit 1
-          fi
+    rows = []
+    for i, g in enumerate(done.to_dict("records"), 1):
+        try:
+            rows += M.player_games(M.boxscore(g["game_pk"]), g)
+        except M.Unavailable as exc:
+            logging.warning("game %s unavailable: %s", g["game_pk"], exc)
+            continue
+        if i % 200 == 0:
+            print(f"  ... {i}/{len(done)} games, {len(rows):,} player-games")
+        time.sleep(pause)
+    if not rows:
+        raise RuntimeError(f"{season}: no player rows were built")
+    df = M.score(pd.DataFrame(rows))
+    print(f"{season}: {len(df):,} player-games, "
+          f"{df['player_id'].nunique():,} players")
+    return df
 
-          python -c "import engine, engine.cache, engine.grade; print('engine imports OK')"
 
-      - name: Commit the repair, if there was one
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A engine
-          if git diff --cached --quiet; then
-            echo "engine/ was already correct"
-          else
-            git commit -m "Put the engine files where python can import them"
-            git push
-          fi
+def main() -> int:
+    logging.basicConfig(level=logging.INFO,
+                        format="%(levelname)s %(name)s: %(message)s")
+    p = argparse.ArgumentParser()
+    p.add_argument("--seasons", default="2024 2025 2026")
+    p.add_argument("--refresh", default="",
+                   help="seasons to re-fetch even if cached (the live one)")
+    p.add_argument("--limit", type=int, default=0,
+                   help="cap games per season, for a quick trial")
+    args = p.parse_args()
 
-      - name: Fetch
-        run: |
-          python mlb_fetch.py \
-            --seasons "${{ inputs.seasons }}" \
-            --refresh "${{ inputs.refresh }}" \
-            --limit "${{ inputs.limit }}"
+    seasons = [int(x) for x in args.seasons.split()]
+    refresh = {int(x) for x in args.refresh.split()} if args.refresh else set()
 
-      - name: Commit the cache
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          if [ -d data ]; then
-            git add -f data
-          fi
-          if git diff --cached --quiet; then
-            echo "nothing new to commit"
-          else
-            git commit -m "MLB history cache: ${{ inputs.seasons }}"
-            git pull --rebase
-            git push
-          fi
+    print("cached before:", C.cached_seasons(SPORT) or "nothing")
+    print("requested    :", seasons)
+    print("refreshing   :", sorted(refresh) or "nothing")
+    print()
 
-      - name: What is on disk now
-        if: always()
-        run: ls -la data 2>/dev/null || echo "(no data directory)"
+    done, skipped, failed = [], [], []
+    for season in sorted(seasons):
+        if C.have(SPORT, season) and season not in refresh:
+            skipped.append(season)
+            print(f"{season}: already cached, skipping")
+            continue
+        try:
+            C.save(fetch_season(season, args.limit), SPORT, season)
+            done.append(season)
+        except Exception as exc:                   # noqa: BLE001
+            failed.append(season)
+            print(f"{season}: FAILED - {str(exc)[:160]}")
+
+    print()
+    print("=" * 60)
+    print(f"fetched : {done or 'nothing'}")
+    print(f"skipped : {skipped or 'nothing'}")
+    print(f"failed  : {failed or 'nothing'}")
+    print(f"cache now holds: {C.cached_seasons(SPORT)}")
+    if failed:
+        print("\nCommit what succeeded and re-run for the rest. Nothing "
+              "already on disk will be fetched again.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
