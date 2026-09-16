@@ -40,7 +40,7 @@ jobs:
           echo "--- engine/ ---"
           ls -la engine 2>/dev/null || echo "(no engine directory)"
 
-          ENGINE_FILES="spec.py frame.py features.py model.py grade.py factors.py cache.py simulate.py ownership.py optimise.py"
+          ENGINE_FILES="__init__.py spec.py frame.py features.py model.py grade.py factors.py cache.py simulate.py ownership.py optimise.py"
 
           mkdir -p engine
           for f in $ENGINE_FILES; do
@@ -66,17 +66,32 @@ jobs:
             exit 1
           fi
 
+          # Compiled bytecode must never be tracked. A .pyc carries the source
+          # mtime it was built against; a fresh checkout gives every file a new
+          # mtime, so a committed .pyc is invalid on arrival, python rewrites
+          # it, and the tree is dirty before anything has run. That is what
+          # broke the push on the last run and threw away 20 minutes of HTTP.
+          rm -f gitignore
+          printf '__pycache__/\n*.pyc\n.env\n\n# Run outputs, not inputs.\nmlb_graded_*.csv\ncfb_depth.csv\ncfb_ready.csv\ncfb_graded.csv\n\n# The history cache IS committed - refetching it costs 20 minutes.\n!data/\n!data/*.csv.gz\n' > .gitignore
+
+          git ls-files | grep '__pycache__' | while read -r f; do
+            echo "  untracking $f"
+            git rm --cached -q -- "$f"
+          done || true
+          find . -path ./.git -prune -o -name '__pycache__' -print0 2>/dev/null \
+            | xargs -0 rm -rf 2>/dev/null || true
+
           python -c "import engine, engine.cache, engine.grade; print('engine imports OK')"
 
       - name: Commit the repair, if there was one
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A engine
+          git add -A
           if git diff --cached --quiet; then
-            echo "engine/ was already correct"
+            echo "repo layout was already correct"
           else
-            git commit -m "Put the engine files where python can import them"
+            git commit -m "Engine into a package; stop tracking bytecode"
             git push
           fi
 
@@ -88,17 +103,37 @@ jobs:
             --limit "${{ inputs.limit }}"
 
       - name: Commit the cache
+        if: always()
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if [ -d data ]; then
-            git add -f data
+
+          # Anything python compiled while fetching is scratch, not a result.
+          find . -path ./.git -prune -o -name '__pycache__' -print0 2>/dev/null \
+            | xargs -0 rm -rf 2>/dev/null || true
+
+          if [ ! -d data ]; then
+            echo "no data directory - nothing was fetched"
+            exit 0
           fi
+
+          git add -f data
           if git diff --cached --quiet; then
             echo "nothing new to commit"
-          else
-            git commit -m "MLB history cache: ${{ inputs.seasons }}"
-            git pull --rebase
+            exit 0
+          fi
+          git commit -m "MLB history cache: ${{ inputs.seasons }}"
+
+          echo "--- anything still dirty would block a rebase ---"
+          git status --porcelain
+
+          # Push, and only if someone else moved main in the meantime, rebase
+          # onto it and try once more. The cache is the expensive artefact of
+          # this job; it does not get dropped because of a race.
+          if ! git push; then
+            echo "push rejected - rebasing onto origin/main and retrying"
+            git fetch origin main
+            git rebase origin/main
             git push
           fi
 
