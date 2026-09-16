@@ -1,15 +1,13 @@
 name: MLB verify
 
-# Every unknown about baseball, answered in one run rather than five:
-# does the schedule answer, what does a box score actually contain, do the
-# DraftKings ids actually JOIN (not merely exist), and do both scoring
-# systems reproduce DraftKings' own published points per game.
+# Every unknown about baseball in one run: does the schedule answer, what
+# does a box score actually contain, do the DraftKings ids actually JOIN
+# (not merely exist), and do BOTH scoring systems reproduce DraftKings' own
+# published points per game.
 #
-# 700 games is not arbitrary. The scoring check compares our per-player
-# average against DraftKings' season average, and at 8 games a perfectly
-# scored hitter still shows an error near 2 points from variance alone.
-# 700 games gives regulars ~40 appearances, which is enough for a mean to
-# mean something. At 120 it measured noise and the guard refused to report.
+# The two thresholds are separate because the two populations are. A hitter
+# plays most days; a starting pitcher appears every fifth. One threshold for
+# both silently excluded every pitcher from a check that then printed PASS.
 
 on:
   workflow_dispatch:
@@ -31,9 +29,13 @@ on:
         required: false
         default: "700"
       min_games:
-        description: "Minimum games per player for the scoring comparison"
+        description: "Minimum games for a HITTER in the scoring check"
         required: false
         default: "25"
+      pitcher_min:
+        description: "Minimum appearances for a PITCHER in the scoring check"
+        required: false
+        default: "8"
 
 jobs:
   verify:
@@ -54,6 +56,7 @@ jobs:
           ARGS="--season ${{ inputs.season }}"
           ARGS="$ARGS --games ${{ inputs.games }}"
           ARGS="$ARGS --min-games ${{ inputs.min_games }}"
+          ARGS="$ARGS --pitcher-min ${{ inputs.pitcher_min }}"
           if [ -n "${{ inputs.start }}" ]; then ARGS="$ARGS --start ${{ inputs.start }}"; fi
           if [ -n "${{ inputs.end }}" ]; then ARGS="$ARGS --end ${{ inputs.end }}"; fi
           echo "EFFECTIVE ARGS: $ARGS"
@@ -62,4 +65,16 @@ jobs:
       - name: Put it on the run page
         if: always()
         run: |
-          {
+          echo '## MLB verify' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -c 60000 mlbverify.txt >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlb-verify
+          path: mlbverify.txt
+          retention-days: 30
+          if-no-files-found: warn
