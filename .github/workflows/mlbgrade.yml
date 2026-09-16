@@ -1,0 +1,83 @@
+name: MLB grade
+
+# Walk-forward: fit on everything strictly before a day, predict it, refit.
+# Hitters and pitchers graded SEPARATELY - neither is allowed to hide behind
+# the other. Reads the committed cache, never the network.
+
+on:
+  workflow_dispatch:
+    inputs:
+      first_season:
+        description: "Earliest training season"
+        required: false
+        default: "2025"
+      test_season:
+        description: "Season to grade"
+        required: false
+        default: "2026"
+      first_day:
+        description: "Day of year to start (182 = 1 July)"
+        required: false
+        default: "196"
+      last_day:
+        description: "Day of year to stop (258 = 15 Sept)"
+        required: false
+        default: "251"
+      every:
+        description: "Grade every Nth day"
+        required: false
+        default: "14"
+      quantiles:
+        description: "Blank for all six; 0.1,0.5,0.9 to run faster"
+        required: false
+        default: "0.1,0.5,0.9"
+
+jobs:
+  grade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Unit tests first
+        run: python test_engine.py
+
+      - name: Grade
+        run: |
+          ARGS="--first-season ${{ inputs.first_season }}"
+          ARGS="$ARGS --test-season ${{ inputs.test_season }}"
+          ARGS="$ARGS --first-day ${{ inputs.first_day }}"
+          ARGS="$ARGS --last-day ${{ inputs.last_day }}"
+          ARGS="$ARGS --every ${{ inputs.every }}"
+          if [ -n "${{ inputs.quantiles }}" ]; then
+            ARGS="$ARGS --quantiles ${{ inputs.quantiles }}"
+          fi
+          echo "EFFECTIVE ARGS: $ARGS"
+          python mlb_run_grade.py $ARGS 2>&1 | tee mlbgrade.txt
+
+      - name: Put it on the run page
+        if: always()
+        run: |
+          echo '## MLB grade' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -c 60000 mlbgrade.txt >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlb-grade
+          path: |
+            mlbgrade.txt
+            mlb_graded_hitters.csv
+            mlb_graded_pitchers.csv
+          retention-days: 30
+          if-no-files-found: warn
