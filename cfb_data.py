@@ -614,13 +614,22 @@ def attach_history(board_df: pd.DataFrame, hist: pd.DataFrame,
         for k in keys:
             index.setdefault(k, athlete)
 
-    matched = []
-    for keys in board_df["keys"]:
-        hit = next((index[k] for k in keys if k in index), None)
-        matched.append(hit)
+    # Matches are accumulated in a plain Python list and written to the frame
+    # exactly once, at the end.
+    #
+    # This is not stylistic. Assigning a mixed list of strings and Nones to a
+    # column makes pandas 3 infer its string dtype, which silently converts
+    # every None to NaN - and `nan is not None` is True, so a guard of
+    # "already matched, skip" then skips every UNMATCHED row instead.
+    #
+    # All three fallback passes below were dead on live data for that reason,
+    # while passing their tests, because a test board where every player is
+    # unmatched stays object dtype and keeps real Nones. The fixtures differed
+    # from production in exactly the dimension being tested.
+    ids: list = [next((index[k] for k in keys if k in index), None)
+                 for keys in board_df["keys"]]
     out = board_df.copy()
-    out["athlete_id"] = matched
-    strict = int(out["athlete_id"].notna().sum())
+    strict = sum(1 for a in ids if a is not None)
 
     # Second pass for the one difference the exact keys cannot absorb: a
     # middle name or initial present on one side only. "Tyler J. Williams" on
@@ -677,13 +686,13 @@ def attach_history(board_df: pd.DataFrame, hist: pd.DataFrame,
     ambiguous = 0
     by_team = 0
     fuzzy = 0
-    col = out.columns.get_loc("athlete_id")
-    teams_col = out["team"] if "team" in out else pd.Series([None] * len(out))
-    for i, (aid, keys, team) in enumerate(zip(out["athlete_id"], out["keys"],
-                                              teams_col)):
-        if aid is not None:
+    teams_col = (list(out["team"]) if "team" in out
+                 else [None] * len(out))
+    names_col = list(out["name"])
+    for i, keys in enumerate(out["keys"]):
+        if ids[i] is not None:
             continue
-        school = (team_map or {}).get(team)
+        school = (team_map or {}).get(teams_col[i])
         hit = None
         for k in keys:
             short = _short(k)
@@ -703,8 +712,7 @@ def attach_history(board_df: pd.DataFrame, hist: pd.DataFrame,
         # form of the other and the surname must actually correspond - and it
         # must identify exactly one athlete on that roster of ~80.
         if hit is None and school is not None and by_school:
-            want_first, want_last = _split_name(primary_key(
-                out.iloc[i]["name"]))
+            want_first, want_last = _split_name(primary_key(names_col[i]))
             found = {a for (sch, _), ids in by_school.items() if sch == school
                      for a in ids}
             hits = set()
@@ -721,9 +729,12 @@ def attach_history(board_df: pd.DataFrame, hist: pd.DataFrame,
             elif len(hits) > 1:
                 ambiguous += 1
         if hit is not None:
-            out.iloc[i, col] = hit
+            ids[i] = hit
 
-    n = int(out["athlete_id"].notna().sum())
+    # Object dtype, explicitly, so a caller checking `is None` or `isna` both
+    # behave and no later assignment re-triggers the coercion above.
+    out["athlete_id"] = pd.Series(ids, index=out.index, dtype=object)
+    n = sum(1 for a in ids if a is not None)
     if n - strict - by_team - fuzzy > 0:
         log.info("join: %d extra matched by dropping a middle name, each "
                  "unambiguous in the full history",
