@@ -417,8 +417,16 @@ def board(draft_group: int) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-_ID_FIELDS = ("mlbId", "MlbId", "mlbid", "sportsRadarId", "pid2",
-              "playerId", "externalId", "srid", "pcode", "tpid")
+# `pdkid` first, because the field dump showed it holding a real MLB id -
+# 658796 for Jacob Misiorowski, where `pid` is DraftKings' own 1217479 and
+# `tsid` is a third party's. Seven guessed names missed it because none of
+# them guessed that a field called "player DK id" would carry the LEAGUE's
+# id. Printing the payload found in one line what guessing had not.
+#
+# Order matters: the first field holding anything wins, so the one known to
+# be right leads and the rest stay only as fallbacks.
+_ID_FIELDS = ("pdkid", "mlbId", "MlbId", "mlbid", "sportsRadarId",
+              "playerId", "externalId", "srid")
 
 
 def board_row_keys(draft_group: int) -> str:
