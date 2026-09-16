@@ -117,6 +117,33 @@ def test_ewm_is_strictly_backward_looking():
 
 # ------------------------------------------------------------------- shapes
 
+def test_build_does_not_change_the_row_count():
+    """The invariant that caught a forty-fold duplication.
+
+    `build` derives columns; it must never add or drop rows. A merge against
+    a frame with duplicate join keys does exactly that, silently - the first
+    `_margins` cross-joined every team against every other team in the week,
+    so a 700-row history came back as 28,350 rows of mostly duplicates. The
+    fit still ran, the numbers still looked plausible, and every player was
+    silently reweighted by how many teams happened to play that week.
+
+    Nothing raises on this. Only counting catches it.
+    """
+    hist = _history(n_weeks=6, n_players=8)
+    out = F.build(hist)
+    assert len(out) == len(hist), (
+        f"build turned {len(hist)} rows into {len(out)}")
+    assert out.duplicated(["player_id", "season", "week"]).sum() == 0
+
+
+def test_one_margin_row_per_team_game():
+    hist = _history(n_weeks=4, n_players=8)
+    df = F.to_model_frame(hist)
+    df["touches"] = 0.0
+    m = F._margins(df)
+    assert m.duplicated(["team", "season", "week"]).sum() == 0, m
+
+
 def test_every_declared_feature_is_produced():
     out = F.build(_history())
     for c in F.FEATURES:
