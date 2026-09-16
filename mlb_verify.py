@@ -140,6 +140,29 @@ def scoring_check(board: pd.DataFrame, hist: pd.DataFrame,
         print(f"  {str(r.name)[:23]:<24}{str(r.position):<5}{int(r.games):>4}"
               f"{r.ours:>8.2f}{r.dk_points_per_game:>8.2f}{r.diff:>+8.2f}")
 
+    # For the worst disagreements, print the actual game lines. Every time
+    # this project stopped theorising about a discrepancy and dumped the
+    # underlying rows, it was resolved in one run - the box-score keys, the
+    # DraftKings id field. A reliever averaging 16 points an appearance is
+    # not a scoring-rule question, it is a "show me the rows" question: one
+    # inning and a strikeout is 4.25.
+    worst_pit = pitchers.reindex(
+        pitchers["diff"].abs().sort_values(ascending=False).index).head(3)
+    if not worst_pit.empty and "player_id" in worst_pit:
+        print()
+        print("  game lines for the three worst pitcher disagreements:")
+        cols = ["date", "team", "opponent", "innings", "strikeout",
+                "earned_run", "hit_allowed", "walk_allowed", "win",
+                "complete_game", "shutout", "points"]
+        for r in worst_pit.itertuples(index=False):
+            rows = hist[hist["player_id"] == r.player_id]
+            print(f"\n    {str(r.name)[:28]} ({r.position}) - "
+                  f"ours {r.ours:.2f}, DK {r.dk_points_per_game:.2f}, "
+                  f"{int(r.games)} rows in window")
+            have = [c for c in cols if c in rows.columns]
+            print("      " + rows[have].head(12).to_string(
+                index=False).replace("\n", "\n      "))
+
     # Judged on the RATIO, not the MAE. Per-player noise does not go away at
     # 25 games - it is still worth about 1.1 points - but it is unbiased, so
     # the median ratio across a couple of hundred players converges on the
