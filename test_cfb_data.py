@@ -402,6 +402,52 @@ def test_without_teams_payload_it_says_so_and_still_tries():
     assert len(m) < 24, "name matching alone should NOT solve every code"
 
 
+def test_confidently_wrong_proposals_are_discarded():
+    """UTST, exactly as the live run hit it.
+
+    "UT Martin" builds UTST from its first token and Utah Tech from its
+    initials; Utah State builds USST and UTAHST and never UTST. So UTST
+    proposed four schools with total confidence and every one was wrong,
+    which is strictly worse than proposing nothing - a code proposing nothing
+    is treated as free and solved by its opponent, and this one was not.
+
+    The recovery is to notice the fixture has ZERO candidates, which cannot
+    mean ambiguity, and throw the proposals away.
+    """
+    board = pd.DataFrame([{"game": "UTST @ UTAH", "team": "UTST",
+                           "opponent": "UTAH", "is_home": 0}])
+    games = [{"away_team": "Utah State", "home_team": "Utah"},
+             {"away_team": "UT Martin", "home_team": "Memphis"},
+             {"away_team": "Utah Tech", "home_team": "Idaho"}]
+    teams = [{"school": s, "abbreviation": a} for s, a in [
+        ("Utah State", "USU"), ("Utah", "UTAH"), ("UT Martin", "UTM"),
+        ("Memphis", "MEM"), ("Utah Tech", "UTU"), ("Idaho", "IDHO")]]
+    m = D.fixture_team_map(board, games, teams)
+    assert m.get("UTAH") == "Utah", m
+    assert m.get("UTST") == "Utah State", m
+
+
+def test_relaxation_does_not_invent_a_mapping():
+    """The relaxation must not turn 'no answer' into 'any answer'.
+
+    Two fixtures, both codes underivable, two plausible games. Zero
+    candidates becomes several candidates, not one, and several is still
+    unsolved. A relaxation that guessed here would be worse than the bug it
+    fixes, because an unsolved code is recoverable and a wrong one is not.
+    """
+    board = pd.DataFrame([
+        {"game": "QQ @ ZZ", "team": "QQ", "opponent": "ZZ", "is_home": 0},
+        {"game": "XX @ YY", "team": "XX", "opponent": "YY", "is_home": 0},
+    ])
+    games = [{"away_team": "Michigan", "home_team": "Ohio State"},
+             {"away_team": "Minnesota", "home_team": "Oregon"}]
+    teams = [{"school": s, "abbreviation": a} for s, a in [
+        ("Michigan", "MICH"), ("Ohio State", "OSU"),
+        ("Minnesota", "MINN"), ("Oregon", "ORE")]]
+    m = D.fixture_team_map(board, games, teams)
+    assert not m, f"should have solved nothing, got {m}"
+
+
 def test_abbreviations_that_must_work():
     board = pd.DataFrame([
         {"game": "TA&M @ BAMA", "team": "TA&M", "opponent": "BAMA",
