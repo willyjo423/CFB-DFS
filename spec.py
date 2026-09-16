@@ -78,6 +78,27 @@ class SportSpec:
     # ones - blowout margin in college football, park factor in baseball.
     extra_features: list[str] = field(default_factory=list)
 
+    # --- correlation -----------------------------------------------------
+    # How much of a player's variance is shared with his game, his team, and
+    # the team-mates he competes with, by position. The SIGN matters more
+    # than the size: a defence is negatively loaded on its own game because
+    # it scores when the offence fails, and a model with that backwards will
+    # happily stack a quarterback with the defence trying to stop him.
+    #
+    # Baseball inverts this again - a pitcher is strongly NEGATIVE with every
+    # opposing hitter - which is exactly why these live with the sport and
+    # not in a shared table of numbers that look comparable and are not.
+    #
+    # Left empty, every position falls back to weak defaults, and the
+    # simulation behaves close to independent. That understates stacking
+    # rather than inventing it, which is the safe direction to be wrong in.
+    loadings: dict = field(default_factory=dict)
+
+    # --- contests --------------------------------------------------------
+    # Roster rules per (site, game type). Hard constraints, not preferences:
+    # getting one wrong produces a lineup that cannot be entered.
+    rosters: dict = field(default_factory=dict)
+
     def __post_init__(self):
         if not self.usage:
             raise ValueError(f"{self.name}: a sport with no usage columns "
