@@ -124,6 +124,56 @@ def name_keys(name) -> set[str]:
     return keys
 
 
+def _split_name(key: str) -> tuple[str, list[str]]:
+    """A normalised key as (first name, surname tokens)."""
+    parts = key.split()
+    if not parts:
+        return "", []
+    return parts[0], parts[1:] or [parts[0]]
+
+
+def first_names_compatible(a: str, b: str) -> bool:
+    """Is one of these the short form of the other?
+
+    Measured, not assumed. Across the misses this rule was built from, every
+    correct pair shared a prefix of at least three characters - matt/matthew
+    and benji/benjamin and zacharyus/zach share four, maxence/max shares
+    three - and every wrong pair shared at most one: mason/stanley zero,
+    quintrevion/tre zero, terrence/t.j. one.
+
+    Edit-distance ratio does NOT separate those two groups; prefix length
+    does, cleanly, with nothing in between. So the rule is prefix length.
+    It costs the nickname cases that share no prefix, which is the right
+    trade: Tre Wisner goes unmatched rather than matching by guesswork.
+    """
+    if a == b:
+        return True
+    if not a or not b:
+        return False
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n >= 3
+
+
+def surnames_compatible(a: list[str], b: list[str]) -> bool:
+    """Same family name, allowing for compound forms and typos.
+
+    Three real shapes: DraftKings carrying a name CFBD does not
+    (Coleman-Williams vs Williams), CFBD carrying one DraftKings does not
+    (Riley vs Riley-Ducker), and an outright transposition in CFBD
+    (Remenowksy for Remenowsky, which scores 0.90).
+    """
+    if set(a) & set(b):
+        return True
+    if not a or not b:
+        return False
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, a[-1], b[-1]).ratio() >= 0.85
+
+
 def primary_key(name) -> str:
     """One key, for grouping. The period-to-space spelling."""
     keys = name_keys(name)
@@ -616,8 +666,17 @@ def attach_history(board_df: pd.DataFrame, hist: pd.DataFrame,
     school_unique = {k: next(iter(v)) for k, v in by_school.items()
                      if len(v) == 1}
 
+    # (school, athlete) -> that athlete's key spellings, for the structured
+    # name-form pass below.
+    roster_keys: dict[tuple, set[str]] = {}
+    if team_map is not None and "school" in hist:
+        for athlete, school_, keys in zip(hist["athlete_id"], hist["school"],
+                                          hist["keys"]):
+            roster_keys.setdefault((school_, athlete), set()).update(keys)
+
     ambiguous = 0
     by_team = 0
+    fuzzy = 0
     col = out.columns.get_loc("athlete_id")
     teams_col = out["team"] if "team" in out else pd.Series([None] * len(out))
     for i, (aid, keys, team) in enumerate(zip(out["athlete_id"], out["keys"],
@@ -639,13 +698,41 @@ def attach_history(board_df: pd.DataFrame, hist: pd.DataFrame,
                 break
             if short in reduced:
                 ambiguous += 1
+        # Last resort, and only within one school: a structured name-form
+        # match. Not blind edit distance - the first name must be a short
+        # form of the other and the surname must actually correspond - and it
+        # must identify exactly one athlete on that roster of ~80.
+        if hit is None and school is not None and by_school:
+            want_first, want_last = _split_name(primary_key(
+                out.iloc[i]["name"]))
+            found = {a for (sch, _), ids in by_school.items() if sch == school
+                     for a in ids}
+            hits = set()
+            for athlete in found:
+                for k in roster_keys.get((school, athlete), ()):  # noqa
+                    f, l = _split_name(k)
+                    if (first_names_compatible(want_first, f)
+                            and surnames_compatible(want_last, l)):
+                        hits.add(athlete)
+                        break
+            if len(hits) == 1:
+                hit = next(iter(hits))
+                fuzzy += 1
+            elif len(hits) > 1:
+                ambiguous += 1
         if hit is not None:
             out.iloc[i, col] = hit
 
     n = int(out["athlete_id"].notna().sum())
-    if n - strict - by_team > 0:
+    if n - strict - by_team - fuzzy > 0:
         log.info("join: %d extra matched by dropping a middle name, each "
-                 "unambiguous in the full history", n - strict - by_team)
+                 "unambiguous in the full history",
+                 n - strict - by_team - fuzzy)
+    if fuzzy:
+        log.info("join: %d matched on name FORM within their own school "
+                 "(short form of a first name, compound or mistyped "
+                 "surname), each identifying exactly one man on that roster",
+                 fuzzy)
     if by_team:
         log.info("join: %d matched by name within their own school, where a "
                  "name ambiguous across all of college football is unique",
