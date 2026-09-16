@@ -181,7 +181,7 @@ def main() -> int:
     print(f"newest completed week of {args.season}: {week}")
 
     head("TEAM MAP")
-    games = D.upcoming_games(key, args.season, week, span=2)
+    games = D.upcoming_games(key, args.season, week, span=3)
     # The teams endpoint carries abbreviations and alternate names. Without it
     # this mapped 6 of 24: Georgia's abbreviation IS "UGA", and no rule
     # derives that from the string "Georgia".
