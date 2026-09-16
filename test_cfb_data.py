@@ -189,31 +189,56 @@ def test_join_matches_across_spellings():
     assert out["athlete_id"].iloc[0] == "77", out
 
 
-def test_join_quality_distinguishes_cheap_from_expensive_misses():
-    """Counting misses cannot tell a $3,000 miss from an $8,500 one.
+def _board(rows):
+    return pd.DataFrame([
+        {"name": n, "salary": s, "position": p, "team": "X",
+         "athlete_id": aid, "dk_points_per_game": ppg}
+        for n, s, p, aid, ppg in rows])
 
-    Both boards below miss exactly one player of four. One miss is harmless
-    and one is a disaster, and the report must say which is which.
+
+def test_a_miss_with_production_is_not_the_same_as_a_miss_without():
+    """Price cannot tell these apart. Published production can.
+
+    Both boards miss exactly one player of four, and the misses are priced
+    identically at $4,500. One has never taken a snap - DraftKings scores him
+    0.0 and prices him at $4,500 precisely BECAUSE it has no data on him.
+    The other is producing 15.2 a game and we lost him.
+
+    A salary-based test calls these the same thing, which is why the first
+    version of this check passed a board that was losing real players.
     """
-    cheap = pd.DataFrame([
-        {"name": "a", "salary": 9000, "position": "QB", "team": "X",
-         "athlete_id": "1"},
-        {"name": "b", "salary": 7000, "position": "WR", "team": "X",
-         "athlete_id": "2"},
-        {"name": "c", "salary": 6000, "position": "RB", "team": "X",
-         "athlete_id": "3"},
-        {"name": "d", "salary": 3000, "position": "TE", "team": "X",
-         "athlete_id": None},
+    harmless = _board([
+        ("a", 9000, "QB", "1", 24.0),
+        ("b", 7000, "WR", "2", 11.0),
+        ("c", 6000, "RB", "3", 9.0),
+        ("backup", 4500, "QB", None, 0.0),
     ])
-    text = D.join_quality(cheap)
-    assert "allowed to fail" in text, text
+    assert D.real_misses(harmless).empty
+    assert "nothing was lost" in D.join_quality(harmless)
 
-    dear = cheap.copy()
-    dear.loc[0, "athlete_id"] = None      # the $9,000 quarterback
-    dear.loc[3, "athlete_id"] = "4"
-    text2 = D.join_quality(dear)
-    assert "these matter" in text2, text2
-    assert "9,000" in text2, text2
+    real = _board([
+        ("a", 9000, "QB", "1", 24.0),
+        ("b", 7000, "WR", "2", 11.0),
+        ("c", 6000, "RB", "3", 9.0),
+        ("producer", 4500, "WR", None, 15.2),
+    ])
+    bad = D.real_misses(real)
+    assert list(bad["name"]) == ["producer"], list(bad["name"])
+    assert "real misses" in D.join_quality(real)
+
+
+def test_the_gate_is_not_fooled_by_a_board_full_of_backups():
+    """The failure mode that made the first gate useless.
+
+    Sixty backups with no snaps and four producers, all matched. A raw match
+    rate reads 6% and fails. The gate that matters reads zero real misses and
+    passes, because nothing was lost.
+    """
+    rows = [(f"backup{i}", 3000, "WR", None, 0.0) for i in range(60)]
+    rows += [(f"star{i}", 9000, "QB", str(i), 20.0) for i in range(4)]
+    board = _board(rows)
+    assert board["athlete_id"].notna().mean() < 0.10
+    assert D.real_misses(board).empty
 
 
 # ----------------------------------------------------------------- fixtures
@@ -425,6 +450,57 @@ def test_confidently_wrong_proposals_are_discarded():
     m = D.fixture_team_map(board, games, teams)
     assert m.get("UTAH") == "Utah", m
     assert m.get("UTST") == "Utah State", m
+
+
+def test_neutral_site_home_away_disagreement():
+    """SMU and Louisiana, exactly as the live run left them.
+
+    Both codes proposed exactly one school, both correct, across a 596-game
+    window - and no fixture contained them in the orientation DraftKings
+    printed. At a neutral site "home" is a bookkeeping choice and the two
+    sources are free to make it differently.
+    """
+    board = pd.DataFrame([
+        {"game": "SMU @ UL", "team": "SMU", "opponent": "UL", "is_home": 0},
+        {"game": "BUFF @ PSU", "team": "BUFF", "opponent": "PSU",
+         "is_home": 0},
+    ])
+    # CFBD has Louisiana as the visitor; DraftKings printed it as the host.
+    games = [{"away_team": "Louisiana", "home_team": "SMU"},
+             {"away_team": "Buffalo", "home_team": "Penn State"}]
+    teams = [{"school": s, "abbreviation": a} for s, a in [
+        ("Louisiana", "UL"), ("SMU", "SMU"), ("Buffalo", "BUFF"),
+        ("Penn State", "PSU")]]
+    m = D.fixture_team_map(board, games, teams)
+    assert m.get("SMU") == "SMU", m
+    assert m.get("UL") == "Louisiana", m
+    # The normally-oriented fixture must still map correctly.
+    assert m.get("BUFF") == "Buffalo", m
+    assert m.get("PSU") == "Penn State", m
+
+
+def test_swap_does_not_override_a_correct_forward_match():
+    """The reversed pass must never win where the strict one could.
+
+    Both fixtures are correctly oriented and involve the same four schools in
+    different pairings. A swap tried too eagerly pairs the wrong teams, which
+    hands players the wrong opponent and the wrong implied total - confident
+    numbers that are wrong in every row.
+    """
+    board = pd.DataFrame([
+        {"game": "MICH @ OSU", "team": "MICH", "opponent": "OSU",
+         "is_home": 0},
+        {"game": "MINN @ ORE", "team": "MINN", "opponent": "ORE",
+         "is_home": 0},
+    ])
+    games = [{"away_team": "Michigan", "home_team": "Ohio State"},
+             {"away_team": "Minnesota", "home_team": "Oregon"}]
+    teams = [{"school": s, "abbreviation": a} for s, a in [
+        ("Michigan", "MICH"), ("Ohio State", "OSU"),
+        ("Minnesota", "MINN"), ("Oregon", "ORE")]]
+    m = D.fixture_team_map(board, games, teams)
+    assert m == {"MICH": "Michigan", "OSU": "Ohio State",
+                 "MINN": "Minnesota", "ORE": "Oregon"}, m
 
 
 def test_relaxation_does_not_invent_a_mapping():
