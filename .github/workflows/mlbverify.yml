@@ -1,9 +1,15 @@
 name: MLB verify
 
 # Every unknown about baseball, answered in one run rather than five:
-# does the schedule answer, what does a box score actually contain, does
-# DraftKings carry the MLB player id, and do both scoring systems reproduce
-# DraftKings' own published points per game.
+# does the schedule answer, what does a box score actually contain, do the
+# DraftKings ids actually JOIN (not merely exist), and do both scoring
+# systems reproduce DraftKings' own published points per game.
+#
+# 700 games is not arbitrary. The scoring check compares our per-player
+# average against DraftKings' season average, and at 8 games a perfectly
+# scored hitter still shows an error near 2 points from variance alone.
+# 700 games gives regulars ~40 appearances, which is enough for a mean to
+# mean something. At 120 it measured noise and the guard refused to report.
 
 on:
   workflow_dispatch:
@@ -13,7 +19,7 @@ on:
         required: false
         default: "2026"
       start:
-        description: "Window start (blank = Aug 15)"
+        description: "Window start (blank = June 1)"
         required: false
         default: ""
       end:
@@ -23,7 +29,11 @@ on:
       games:
         description: "How many finished games to pull"
         required: false
-        default: "120"
+        default: "700"
+      min_games:
+        description: "Minimum games per player for the scoring comparison"
+        required: false
+        default: "25"
 
 jobs:
   verify:
@@ -41,7 +51,9 @@ jobs:
 
       - name: Verify
         run: |
-          ARGS="--season ${{ inputs.season }} --games ${{ inputs.games }}"
+          ARGS="--season ${{ inputs.season }}"
+          ARGS="$ARGS --games ${{ inputs.games }}"
+          ARGS="$ARGS --min-games ${{ inputs.min_games }}"
           if [ -n "${{ inputs.start }}" ]; then ARGS="$ARGS --start ${{ inputs.start }}"; fi
           if [ -n "${{ inputs.end }}" ]; then ARGS="$ARGS --end ${{ inputs.end }}"; fi
           echo "EFFECTIVE ARGS: $ARGS"
@@ -51,17 +63,3 @@ jobs:
         if: always()
         run: |
           {
-            echo '## MLB verify'
-            echo '```'
-            tail -c 60000 mlbverify.txt || echo "(no output captured)"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Keep the output
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: mlb-verify
-          path: mlbverify.txt
-          retention-days: 30
-          if-no-files-found: warn
