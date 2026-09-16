@@ -222,6 +222,65 @@ def test_exact_match_still_wins_over_the_reduced_pass():
     assert D.attach_history(board, hist)["athlete_id"].iloc[0] == "9"
 
 
+def test_school_resolves_a_nationally_ambiguous_name():
+    """Ryan Williams is ambiguous across college football, unique at Alabama.
+
+    This is what solving the team map buys. Without a school the reduced
+    match must refuse, because guessing between two Ryan Williamses attaches
+    a wrong projection to a real salary. With one, there is nothing to guess.
+    """
+    board = pd.DataFrame([{"name": "Ryan Coleman-Williams", "salary": 7900,
+                           "position": "WR", "team": "BAMA",
+                           "dk_points_per_game": 15.1}])
+    board["keys"] = board["name"].map(D.name_keys)
+    hist = pd.DataFrame([
+        {"athlete_id": "1", "name": "Ryan Williams", "school": "Alabama"},
+        {"athlete_id": "2", "name": "Ryan Williams", "school": "Ohio State"},
+    ])
+    hist["keys"] = hist["name"].map(D.name_keys)
+    assert D.attach_history(board, hist)["athlete_id"].iloc[0] is None
+    got = D.attach_history(board, hist,
+                           team_map={"BAMA": "Alabama"})["athlete_id"].iloc[0]
+    assert got == "1", got
+
+
+def test_school_restriction_still_refuses_a_real_collision():
+    """Two men of the same name at the SAME school is still a coin flip."""
+    board = pd.DataFrame([{"name": "Ryan J. Williams", "salary": 7900,
+                           "position": "WR", "team": "BAMA",
+                           "dk_points_per_game": 15.1}])
+    board["keys"] = board["name"].map(D.name_keys)
+    hist = pd.DataFrame([
+        {"athlete_id": "1", "name": "Ryan Williams", "school": "Alabama"},
+        {"athlete_id": "2", "name": "Ryan Scott Williams", "school": "Alabama"},
+    ])
+    hist["keys"] = hist["name"].map(D.name_keys)
+    got = D.attach_history(board, hist, team_map={"BAMA": "Alabama"})
+    assert got["athlete_id"].iloc[0] is None, got["athlete_id"].iloc[0]
+
+
+def test_diagnose_misses_separates_the_causes():
+    """A spelling variant and an absent player must not read the same."""
+    joined = pd.DataFrame([
+        {"name": "Ryan Coleman-Williams", "salary": 7900, "position": "WR",
+         "team": "BAMA", "athlete_id": None, "dk_points_per_game": 15.1},
+        {"name": "Ghost Player", "salary": 4000, "position": "RB",
+         "team": "KENT", "athlete_id": None, "dk_points_per_game": 7.7},
+    ])
+    hist = pd.DataFrame([
+        {"athlete_id": "1", "name": "Ryan Williams", "school": "Alabama"},
+        {"athlete_id": "3", "name": "Someone Else", "school": "Kent State"},
+    ])
+    text = D.diagnose_misses(joined, hist,
+                             team_map={"BAMA": "Alabama",
+                                       "KENT": "Kent State"})
+    assert "Ryan Williams" in text, text
+    assert "Someone Else" in text, text
+    # An unmapped school must be called out as such, not silently skipped.
+    text2 = D.diagnose_misses(joined, hist, team_map={})
+    assert "SCHOOL UNMAPPED" in text2, text2
+
+
 def test_join_matches_across_spellings():
     board = pd.DataFrame([{"name": "AJ Swann", "salary": 8500,
                            "position": "QB", "team": "ARK"}])
