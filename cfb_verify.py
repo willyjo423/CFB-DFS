@@ -240,22 +240,35 @@ def main() -> int:
     # 0.0. The question is whether we lost anyone who has actually produced.
     rate = joined_deep["athlete_id"].notna().mean()
     bad = D.real_misses(joined_deep)
+    # Gated on production lost, not on a count. A count treats a 17.9 ppg
+    # running back and a 1.2 ppg fourth receiver as the same event, and the
+    # whole reason this check exists is that they are not. The question is
+    # what share of the board's actual scoring the model cannot see.
+    total_ppg = pd.to_numeric(joined_deep["dk_points_per_game"],
+                              errors="coerce").fillna(0).sum()
+    lost_ppg = pd.to_numeric(bad["dk_points_per_game"],
+                             errors="coerce").fillna(0).sum() if not bad.empty \
+        else 0.0
+    share = lost_ppg / max(1e-9, total_ppg)
     print()
     print(f"raw match rate         : {rate:.1%} "
           f"(most of the rest are backups with no snaps)")
     print(f"unmatched WITH scoring : {len(bad)}")
-    if bad.empty:
-        print("\nPASS - every player DraftKings credits with production has "
-              "history to project from.")
-    elif len(bad) <= 5:
-        print(f"\nPASS with {len(bad)} exception(s) - small enough to drop "
-              f"rather than guess, but worth a look:")
-        for r in bad.itertuples(index=False):
+    print(f"production lost        : {lost_ppg:.1f} of {total_ppg:.1f} ppg "
+          f"on the board ({share:.2%})")
+    if not bad.empty:
+        print("\n  still unmatched:")
+        for r in bad.nlargest(10, "dk_points_per_game").itertuples(
+                index=False):
             print(f"    {str(r.name)[:26]:<27}{r.team:<6}"
                   f"{float(r.dk_points_per_game):>6.1f} ppg")
+    if share <= 0.01:
+        print(f"\nPASS - under 1% of the board's published production is "
+              f"unmatched. What remains is immaterial and gets dropped from "
+              f"the pool rather than guessed at.")
     else:
-        print(f"\nFAIL - {len(bad)} players have published production and no "
-              f"matched history. The join is losing real players.")
+        print(f"\nFAIL - {share:.2%} of the board's production has no matched "
+              f"history. That is enough to distort a slate.")
         problems += 1
 
     head("VERDICT")
