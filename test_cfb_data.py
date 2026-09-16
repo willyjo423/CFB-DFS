@@ -291,6 +291,117 @@ def test_two_codes_never_claim_the_same_school():
     assert len(set(m.values())) == len(m), m
 
 
+def _slate_20260919():
+    """The real Saturday slate the first live verify run mapped 6 of 24 on.
+
+    Twelve fixtures, twenty-four codes, and CFBD team records carrying the
+    abbreviations that endpoint actually publishes. This is the regression
+    test for the whole team-map rewrite.
+    """
+    fixtures = [
+        ("UTST", "UTAH", "Utah State", "Utah"),
+        ("UGA", "ARK", "Georgia", "Arkansas"),
+        ("KENT", "OSU", "Kent State", "Ohio State"),
+        ("MSST", "SCAR", "Mississippi State", "South Carolina"),
+        ("UK", "TA&M", "Kentucky", "Texas A&M"),
+        ("FSU", "BAMA", "Florida State", "Alabama"),
+        ("BUFF", "PSU", "Buffalo", "Penn State"),
+        ("STAN", "DUKE", "Stanford", "Duke"),
+        ("RU", "USC", "Rutgers", "USC"),
+        ("ASU", "CLEM", "Arizona State", "Clemson"),
+        ("KU", "UL", "Kansas", "Louisiana"),
+        ("SMU", "UNC", "SMU", "North Carolina"),
+    ]
+    board = pd.DataFrame([{"game": f"{a} @ {h}", "team": a, "opponent": h,
+                           "is_home": 0} for a, h, _, _ in fixtures])
+    games = [{"away_team": aw, "home_team": hm} for _, _, aw, hm in fixtures]
+    abbrev = {
+        "Utah State": "USU", "Utah": "UTAH", "Georgia": "UGA",
+        "Arkansas": "ARK", "Kent State": "KENT", "Ohio State": "OSU",
+        "Mississippi State": "MSST", "South Carolina": "SCAR",
+        "Kentucky": "UK", "Texas A&M": "TAMU", "Florida State": "FSU",
+        "Alabama": "ALA", "Buffalo": "BUFF", "Penn State": "PSU",
+        "Stanford": "STAN", "Duke": "DUKE", "Rutgers": "RUTG", "USC": "USC",
+        "Arizona State": "ASU", "Clemson": "CLEM", "Kansas": "KU",
+        "Louisiana": "UL", "SMU": "SMU", "North Carolina": "UNC",
+    }
+    teams = [{"school": s, "abbreviation": a} for s, a in abbrev.items()]
+    expected = {}
+    for away_code, home_code, away, home in fixtures:
+        expected[away_code] = away
+        expected[home_code] = home
+    return board, games, teams, expected
+
+
+def test_real_slate_maps_every_code():
+    board, games, teams, expected = _slate_20260919()
+    m = D.fixture_team_map(board, games, teams)
+    missing = {c for c in expected if c not in m}
+    wrong = {c: (m[c], expected[c]) for c in expected
+             if c in m and m[c] != expected[c]}
+    assert not wrong, f"WRONG mappings: {wrong}"
+    assert not missing, f"unmapped: {sorted(missing)}"
+
+
+def test_uk_and_ku_do_not_deadlock():
+    """The collision the two-tier alias scheme exists to prevent.
+
+    Constructing "initials + U" makes Kentucky claim KU, and "U + first
+    letter" makes Kansas claim UK. With one flat tier each code proposes both
+    schools, both fixtures see two candidates, and neither resolves.
+
+    Getting this to fail took three attempts, and the first two are the
+    lesson. On the full slate the collision is survivable, because other
+    fixtures claim schools and prune these candidate lists by elimination. It
+    is still survivable with only these two fixtures, as long as ONE home code
+    is officially claimed - that fixture resolves and rescues the other.
+
+    The deadlock needs both home codes to be underivable, which is precisely
+    the BAMA and TA&M situation on the real board: Alabama's abbreviation is
+    ALA and Texas A&M's is TAMU, so neither DraftKings code is claimed by
+    anyone. Then nothing can be resolved first and single-tier maps zero of
+    four. Two earlier versions of this test passed against the broken
+    implementation, which is the same as not testing it.
+    """
+    board = pd.DataFrame([
+        {"game": "UK @ BAMA", "team": "UK", "opponent": "BAMA", "is_home": 0},
+        {"game": "KU @ TA&M", "team": "KU", "opponent": "TA&M", "is_home": 0},
+    ])
+    games = [{"away_team": "Kentucky", "home_team": "Alabama"},
+             {"away_team": "Kansas", "home_team": "Texas A&M"}]
+    teams = [{"school": "Kentucky", "abbreviation": "UK"},
+             {"school": "Kansas", "abbreviation": "KU"},
+             {"school": "Alabama", "abbreviation": "ALA"},
+             {"school": "Texas A&M", "abbreviation": "TAMU"}]
+    m = D.fixture_team_map(board, games, teams)
+    assert m.get("UK") == "Kentucky", m
+    assert m.get("KU") == "Kansas", m
+    assert m.get("BAMA") == "Alabama", m
+    assert m.get("TA&M") == "Texas A&M", m
+
+
+def test_codes_no_rule_can_derive_still_resolve():
+    """BAMA, TA&M and UTST are derivable from nothing. Fixtures carry them.
+
+    Alabama's abbreviation is ALA, Texas A&M's is TAMU, Utah State's is USU.
+    None of the three DraftKings codes is a prefix, an initialism or a
+    substring of its school. Each is solved only by who its opponent is.
+    """
+    board, games, teams, _ = _slate_20260919()
+    m = D.fixture_team_map(board, games, teams)
+    assert m.get("BAMA") == "Alabama", m.get("BAMA")
+    assert m.get("TA&M") == "Texas A&M", m.get("TA&M")
+    assert m.get("UTST") == "Utah State", m.get("UTST")
+
+
+def test_without_teams_payload_it_says_so_and_still_tries():
+    """The fallback must degrade, not crash - and must not claim success."""
+    board, games, _, _ = _slate_20260919()
+    m = D.fixture_team_map(board, games, teams=None)
+    assert isinstance(m, dict)
+    assert len(m) < 24, "name matching alone should NOT solve every code"
+
+
 def test_abbreviations_that_must_work():
     board = pd.DataFrame([
         {"game": "TA&M @ BAMA", "team": "TA&M", "opponent": "BAMA",
