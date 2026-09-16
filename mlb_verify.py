@@ -72,7 +72,7 @@ def gather(season: int, start: str, end: str, limit: int) -> pd.DataFrame:
 
 
 def scoring_check(board: pd.DataFrame, hist: pd.DataFrame,
-                  min_games: int = 25) -> int:
+                  min_games: int = 25, pitcher_min: int = 8) -> int:
     """Recompute DraftKings' published ppg from our rules. 0 if sane."""
     head("SCORING VALIDATION  (ours vs DraftKings' published ppg)")
     joined = M.attach_history(board, hist)
@@ -98,7 +98,14 @@ def scoring_check(board: pd.DataFrame, hist: pd.DataFrame,
     # both sides shared a denominator. Here they do not, so the comparison
     # is restricted to players with enough games for their mean to mean
     # something.
-    m = m[m["games"] >= min_games]
+    # Pitchers need their own threshold. A starter makes about 32 starts a
+    # season, so across half a window he appears perhaps fifteen times - and
+    # a 25-game minimum silently excluded every pitcher from the first
+    # comparison that otherwise passed. Pitcher scoring is the half most
+    # likely to be wrong (two rule sets, conditional bonuses, innings as
+    # thirds) and it was the half going unchecked.
+    is_pit = m["position"].astype(str).str.upper().isin(M.PITCHER_POSITIONS)
+    m = m[np.where(is_pit, m["games"] >= pitcher_min, m["games"] >= min_games)]
     if len(m) < 20:
         print(f"only {len(m)} players have {min_games}+ games in this window."
               f" Widen it - a comparison on fewer is measuring variance.")
@@ -114,8 +121,9 @@ def scoring_check(board: pd.DataFrame, hist: pd.DataFrame,
         M.PITCHER_POSITIONS)]
     hitters = m[~m.index.isin(pitchers.index)]
 
-    print(f"players compared : {len(m)} with {min_games}+ games  "
-          f"({len(hitters)} hitters, {len(pitchers)} pitchers)")
+    print(f"players compared : {len(m)}  ({len(hitters)} hitters with "
+          f"{min_games}+ games, {len(pitchers)} pitchers with "
+          f"{pitcher_min}+)")
     print(f"median games each: {int(m['games'].median())}")
     print(f"MAE              : {mae:.3f} points per game")
     print(f"median ratio     : {ratio:.4f}   (1.0000 is exact agreement)")
@@ -137,6 +145,14 @@ def scoring_check(board: pd.DataFrame, hist: pd.DataFrame,
     # the median ratio across a couple of hundred players converges on the
     # truth while the MAE never does.
     print()
+    if len(pitchers) < 5 or len(hitters) < 5:
+        missing = "pitchers" if len(pitchers) < 5 else "hitters"
+        print(f"\nINCOMPLETE - only {len(pitchers)} pitchers and "
+              f"{len(hitters)} hitters cleared their thresholds, so the "
+              f"{missing} rule set is UNVERIFIED. A pass on one half is not "
+              f"a pass.")
+        return 1
+
     off = abs(ratio - 1.0)
     if off <= 0.02:
         print(f"PASS - the median player scores within {off:.1%} of "
@@ -158,6 +174,8 @@ def main() -> int:
     p.add_argument("--start", default="")
     p.add_argument("--end", default="")
     p.add_argument("--games", type=int, default=700)
+    p.add_argument("--pitcher-min", type=int, default=8,
+                   help="pitchers appear far less often than hitters")
     p.add_argument("--min-games", type=int, default=25,
                    help="players with fewer are too noisy to "
                         "compare")
@@ -239,7 +257,8 @@ def main() -> int:
         print(f"\n{by_id} rows join on a league id - an integer comparison, "
               f"no name matching needed for those.")
 
-    problems += scoring_check(board, hist, args.min_games)
+    problems += scoring_check(board, hist, args.min_games,
+                              args.pitcher_min)
 
     head("VERDICT")
     if problems == 0:
