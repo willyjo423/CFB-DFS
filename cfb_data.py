@@ -581,17 +581,49 @@ def join_quality(joined: pd.DataFrame) -> str:
              f"  matched   salary: ${hit['salary'].min():,.0f}-"
              f"${hit['salary'].max():,.0f}, median "
              f"${hit['salary'].median():,.0f}"]
-    expensive = miss[miss["salary"] >= hit["salary"].median()]
-    if not expensive.empty:
-        lines.append(f"  {len(expensive)} unmatched players priced at or "
-                     f"above the matched median - these matter:")
-        for r in expensive.nlargest(10, "salary").itertuples(index=False):
-            lines.append(f"    ${int(r.salary):>6,}  {r.position:<4} "
-                         f"{str(r.name)[:28]:<28} {r.team}")
-    else:
-        lines.append("  every miss is below the matched median price - the "
-                     "shape a join is allowed to fail in")
+    # Price is a weak proxy. DraftKings prices a true freshman third-string
+    # quarterback at $4,500 precisely BECAUSE it has no data on him, so a
+    # miss above the median price is not evidence of anything by itself.
+    #
+    # The published points per game is the sharp test, because it is
+    # DraftKings telling us whether the player has played. A miss with 0.0
+    # ppg is a player with no snaps and nothing to match - correct and
+    # harmless. A miss with a POSITIVE ppg is a real failure: DraftKings
+    # found his production and we did not.
+    if "dk_points_per_game" in miss:
+        played = miss[pd.to_numeric(miss["dk_points_per_game"],
+                                    errors="coerce").fillna(0) > 0]
+        lines.append("")
+        lines.append(f"  of the {len(miss)} misses, {len(miss) - len(played)} "
+                     f"have never scored a point for DraftKings either")
+        if played.empty:
+            lines.append("  EVERY unmatched player has 0.0 published points "
+                         "per game - nothing was lost")
+        else:
+            lines.append(f"  {len(played)} unmatched players HAVE published "
+                         f"production - these are real misses:")
+            for r in played.nlargest(12, "dk_points_per_game").itertuples(
+                    index=False):
+                lines.append(f"    ${int(r.salary):>6,}  {r.position:<4} "
+                             f"{str(r.name)[:26]:<27} {r.team:<6} "
+                             f"{float(r.dk_points_per_game):>6.1f} ppg")
     return "\n".join(lines)
+
+
+def real_misses(joined: pd.DataFrame) -> pd.DataFrame:
+    """Unmatched players DraftKings says have actually produced.
+
+    This is the number to gate on. The raw match rate counts third-string
+    quarterbacks who have never taken a snap, and on a college board that is
+    most of the roster - 850 priced players across 24 teams is about 35 a
+    side, where perhaps 18 are fantasy-relevant. Failing a build because 40%
+    of a board is unrosterable backups measures the wrong thing.
+    """
+    if "dk_points_per_game" not in joined:
+        return joined.iloc[0:0]
+    ppg = pd.to_numeric(joined["dk_points_per_game"],
+                        errors="coerce").fillna(0)
+    return joined[joined["athlete_id"].isna() & (ppg > 0)]
 
 
 # ------------------------------------------------------------------ fixtures
@@ -755,9 +787,25 @@ def fixture_team_map(board_df: pd.DataFrame, games: list[dict],
             return False                  # another code already claimed it
         return code in free or proposes(code, school)
 
+    swap = {"on": False}
+
     def candidates(away_code: str, home_code: str) -> list:
-        return [(a, h) for a, h in cfbd_fixtures
-                if compatible(away_code, a) and compatible(home_code, h)]
+        """Schools for (away_code, home_code), in that order.
+
+        The swap phase exists because "home" is not always a fact. At a
+        neutral site it is a bookkeeping choice, and DraftKings and CFBD are
+        free to make it differently - which is how SMU and Louisiana both
+        appeared in the fetched schedule, each proposing exactly one correct
+        school, with no fixture containing them in the orientation DraftKings
+        printed. Trying the reverse is not a loosening: both sides must still
+        match, and the pair must still be unique.
+        """
+        out = [(a, h) for a, h in cfbd_fixtures
+               if compatible(away_code, a) and compatible(home_code, h)]
+        if not out and swap["on"]:
+            out = [(h, a) for a, h in cfbd_fixtures
+                   if compatible(away_code, h) and compatible(home_code, a)]
+        return out
 
     def run(pending: list) -> list:
         for _ in range(len(pending) + 1):
@@ -779,6 +827,19 @@ def fixture_team_map(board_df: pd.DataFrame, games: list[dict],
         return pending
 
     unsolved = run(list(dk_fixtures))
+
+    # Only once the strict orientation has extracted everything it can. Doing
+    # this earlier would let a reversed match win where a correct forward one
+    # existed, and every code it maps is one the strict pass could not.
+    if unsolved:
+        swap["on"] = True
+        before = len(mapping)
+        unsolved = run(unsolved)
+        if len(mapping) > before:
+            log.info("%d code(s) matched only with home and away reversed - "
+                     "neutral-site games, where the two sources disagree "
+                     "about which side is nominally home",
+                     len(mapping) - before)
 
     # A fixture with ZERO candidates is not ambiguous - it is misinformed.
     # Every school its codes propose is wrong, which is strictly worse than
