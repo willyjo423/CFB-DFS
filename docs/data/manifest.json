@@ -1,0 +1,26 @@
+{
+ "updated_at": "2026-09-17T16:11:10+00:00",
+ "slates": [
+  {
+   "sport": "mlb",
+   "site": "dk",
+   "kind": "classic",
+   "label": "MLB $100K Baseball Pocket Cup mini-MAX Qualifier #277 [150 Entry Max]",
+   "file": "data/mlb_dk_classic_153615.json"
+  },
+  {
+   "sport": "mlb",
+   "site": "dk",
+   "kind": "classic",
+   "label": "MLB $85K Walk-Off Home Run [$20K to 1st]",
+   "file": "data/mlb_dk_classic_153604.json"
+  },
+  {
+   "sport": "mlb",
+   "site": "dk",
+   "kind": "classic",
+   "label": "MLB $3.9K Perfect Game [$2K to 1st] (Early)",
+   "file": "data/mlb_dk_classic_153600.json"
+  }
+ ]
+}
