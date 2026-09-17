@@ -51,11 +51,30 @@ jobs:
 
           ENGINE_FILES="__init__.py spec.py frame.py features.py model.py grade.py factors.py cache.py simulate.py ownership.py optimise.py"
 
+          # A root copy of an engine file is a NEW UPLOAD, and it wins.
+          #
+          # The steady state of this repo has no engine files in the root -
+          # they were cleaned out once and stay out. So anything that appears
+          # there afterwards can only have come from GitHub's web uploader,
+          # which drops files at the top level, and is therefore newer than
+          # whatever engine/ holds.
+          #
+          # This step used to assume the opposite: where both existed it kept
+          # engine/ and deleted the root copy. That silently threw away a
+          # rewritten grade.py and features.py, committed the deletion, and
+          # then ran the tests against the stale code they were meant to
+          # replace - which is how a leak proof that had just been taught to
+          # fail went back to reporting INCONCLUSIVE. Resolving a conflict is
+          # fine; resolving it in the wrong direction in silence is not.
           mkdir -p engine
           for f in $ENGINE_FILES; do
-            if [ -f "$f" ] && [ ! -f "engine/$f" ]; then
-              echo "  moving stray $f -> engine/$f"
-              mv "$f" "engine/$f"
+            if [ -f "$f" ]; then
+              if [ -f "engine/$f" ] && ! cmp -s "$f" "engine/$f"; then
+                echo "  installing NEWER uploaded $f over engine/$f"
+              else
+                echo "  moving $f -> engine/$f"
+              fi
+              mv -f "$f" "engine/$f"
             fi
           done
 
@@ -63,17 +82,6 @@ jobs:
             echo "  creating engine/__init__.py"
             printf 'from .spec import SportSpec\nfrom . import frame, features\n\n__all__ = ["SportSpec", "frame", "features"]\n' > engine/__init__.py
           fi
-
-          # The first repair left copies of every engine file in the root as
-          # well as in engine/. Two files with the same name and different
-          # contents is how a fix gets applied to the copy nobody imports, so
-          # the duplicates go, and only when engine/ already has that file.
-          for f in $ENGINE_FILES; do
-            if [ -f "$f" ] && [ -f "engine/$f" ]; then
-              echo "  removing duplicate root copy of $f"
-              rm -f "$f"
-            fi
-          done
 
           missing=""
           for f in $ENGINE_FILES; do
