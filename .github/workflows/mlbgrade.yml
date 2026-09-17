@@ -42,14 +42,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Make the engine importable
+      - name: Tidy the repo layout
         run: |
           echo "--- repo root ---"
           ls -la
           echo "--- engine/ ---"
           ls -la engine 2>/dev/null || echo "(no engine directory)"
 
-          ENGINE_FILES="spec.py frame.py features.py model.py grade.py factors.py cache.py simulate.py ownership.py optimise.py"
+          ENGINE_FILES="__init__.py spec.py frame.py features.py model.py grade.py factors.py cache.py simulate.py ownership.py optimise.py"
 
           mkdir -p engine
           for f in $ENGINE_FILES; do
@@ -64,6 +64,17 @@ jobs:
             printf 'from .spec import SportSpec\nfrom . import frame, features\n\n__all__ = ["SportSpec", "frame", "features"]\n' > engine/__init__.py
           fi
 
+          # The first repair left copies of every engine file in the root as
+          # well as in engine/. Two files with the same name and different
+          # contents is how a fix gets applied to the copy nobody imports, so
+          # the duplicates go, and only when engine/ already has that file.
+          for f in $ENGINE_FILES; do
+            if [ -f "$f" ] && [ -f "engine/$f" ]; then
+              echo "  removing duplicate root copy of $f"
+              rm -f "$f"
+            fi
+          done
+
           missing=""
           for f in $ENGINE_FILES; do
             [ -f "engine/$f" ] || missing="$missing $f"
@@ -71,11 +82,31 @@ jobs:
           if [ -n "$missing" ]; then
             echo ""
             echo "FATAL: these engine files are nowhere in this repo:$missing"
-            echo "Upload them into an engine/ folder and re-run."
             exit 1
           fi
 
+          rm -f gitignore
+          printf '__pycache__/\n*.pyc\n.env\n\n# Run outputs, not inputs.\nmlb_graded_*.csv\ncfb_depth.csv\ncfb_ready.csv\ncfb_graded.csv\n\n# The history cache IS committed - refetching it costs 20 minutes.\n!data/\n!data/*.csv.gz\n' > .gitignore
+
+          git ls-files | grep '__pycache__' | while read -r f; do
+            git rm --cached -q -- "$f"
+          done || true
+          find . -path ./.git -prune -o -name '__pycache__' -print0 2>/dev/null \
+            | xargs -0 rm -rf 2>/dev/null || true
+
           python -c "import engine, engine.cache, engine.grade; print('engine imports OK')"
+
+      - name: Commit the tidy-up, if there was one
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "repo layout was already correct"
+          else
+            git commit -m "One copy of each engine file, in engine/"
+            git push || (git fetch origin main && git rebase origin/main && git push)
+          fi
 
       - name: What history is cached
         run: ls -la data 2>/dev/null || echo "(no data directory - run MLB fetch history first)"
