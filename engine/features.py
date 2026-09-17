@@ -118,7 +118,16 @@ def _team_and_opponent(df: pd.DataFrame, spec) -> pd.DataFrame:
     Aggregated from the players rather than from a team-level feed, because
     there is not always a team-level feed to trust, and because a defence's
     record must not include the game being predicted.
+
+    Idempotent, like add_baselines and for the same reason. These three
+    columns arrive by MERGE rather than by assignment, so calling build on a
+    frame that already carries them produced `team_ewm_touches_x` / `_y` and
+    a KeyError two lines later. That is exactly what stopped the leak proof
+    from being able to re-derive features from a tampered frame.
     """
+    df = df.drop(columns=[c for c in ("team_ewm_points", "team_ewm_touches",
+                                      "opp_ewm_points_allowed")
+                          if c in df.columns])
     team = (df.groupby(["team", "season", "period"], as_index=False)
             .agg(points=("points", "sum"), touches=("touches", "sum"))
             .sort_values(["team", "season", "period"]))

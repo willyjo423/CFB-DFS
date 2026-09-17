@@ -125,6 +125,21 @@ def prove_no_leak(built: pd.DataFrame, spec, test_season: int,
          never reached anything and this test could not detect a leak either.
 
     The second condition is the one that was missing twice.
+
+    Why the tampering goes BOTH ways
+    --------------------------------
+    This used to pick the day's highest scorer and then raise his points to
+    500. Those two choices cancel each other out. A gradient-boosted tree only
+    changes its answer when an input crosses a split threshold, and every
+    threshold it learned lies inside the observed range - so moving a value
+    that is ALREADY at the top of that range even higher crosses nothing.
+
+    That was not theoretical. Declaring `points` itself as a feature - about
+    as blatant a leak as can be written - still produced an identical
+    prediction to fifteen decimal places, and this check called it a PASS.
+
+    So the outcome is now driven to both extremes. A leak has to survive
+    being told the player scored nothing AND that he scored 500.
     """
     data = add_baselines(built)
     here = data[(data["season"] == test_season) & (data["period"] == period)]
@@ -133,13 +148,21 @@ def prove_no_leak(built: pd.DataFrame, spec, test_season: int,
                 "failure to verify, not as a pass")
     pid = here.sort_values("points", ascending=False)["player_id"].iloc[0]
 
-    tampered = data.copy()
-    mask = ((tampered["player_id"] == pid)
-            & (tampered["season"] == test_season)
-            & (tampered["period"] == period))
-    tampered.loc[mask, "points"] = 500.0
-    lines = [f"tampering with {pid}, {test_season} period {period}: "
-             f"points -> 500"]
+    # Tamper with the RAW frame and re-derive EVERYTHING from it.
+    #
+    # This used to copy `data` - a frame whose features and baselines had
+    # already been materialised - and change `points` on the copy. Nothing
+    # downstream recomputed, so the later-period inputs could not possibly
+    # move, condition 2 was False on every run this check has ever made, and
+    # it printed INCONCLUSIVE every single time, at the top of a wall of
+    # numbers that looked fine.
+    #
+    # A check that cannot pass proves exactly as little as one that cannot
+    # fail. This project has now produced both.
+    mask = ((built["player_id"] == pid)
+            & (built["season"] == test_season)
+            & (built["period"] == period))
+    lines = [f"tampering with {pid}, {test_season} period {period}"]
 
     past = data[(data["season"] < test_season)
                 | ((data["season"] == test_season)
@@ -150,19 +173,30 @@ def prove_no_leak(built: pd.DataFrame, spec, test_season: int,
         return f"leak proof INCONCLUSIVE: {exc}"
 
     a = m.predict(here[here["player_id"] == pid])[spec.qcol(0.5)].to_numpy()
-    t_here = tampered[(tampered["season"] == test_season)
-                      & (tampered["period"] == period)]
-    b = m.predict(t_here[t_here["player_id"] == pid])[
-        spec.qcol(0.5)].to_numpy()
-    same = bool(np.allclose(a, b, equal_nan=True))
-    lines.append(f"  same-period prediction unchanged: {same}")
-
     sel = lambda d: d[(d["player_id"] == pid)                    # noqa: E731
                       & (d["season"] == test_season)
                       & (d["period"] > period)]["prior_mean"].to_numpy(float)
-    later_clean, later_tamp = sel(data), sel(tampered)
-    moved = bool(len(later_clean)
-                 and not np.allclose(later_clean, later_tamp, equal_nan=True))
+    later_clean = sel(data)
+
+    same, moved = True, False
+    for value in (0.0, 500.0):
+        raw = built.copy()
+        raw.loc[mask, "points"] = value
+        tampered = add_baselines(EF.build(raw, spec, validate=False))
+
+        t_here = tampered[(tampered["season"] == test_season)
+                          & (tampered["period"] == period)]
+        b = m.predict(t_here[t_here["player_id"] == pid])[
+            spec.qcol(0.5)].to_numpy()
+        unchanged = bool(np.allclose(a, b, equal_nan=True))
+        same = same and unchanged
+        lines.append(f"  points -> {value:>5.0f}: same-period prediction "
+                     f"unchanged: {unchanged}")
+
+        moved = moved or bool(
+            len(later_clean)
+            and not np.allclose(later_clean, sel(tampered), equal_nan=True))
+
     lines.append(f"  later-period inputs DID move: {moved}")
 
     if same and moved:
