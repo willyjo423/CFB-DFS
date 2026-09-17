@@ -24,6 +24,10 @@ a hitter's day and is published about two hours before first pitch. That is a
 live-projection problem rather than a historical one, and it is the most
 valuable thing still missing from this model - stated here rather than
 discovered as a weak grade later.
+
+**Two games in one day.** Football never has this. Baseball does, about
+thirty times a season, and it breaks the engine's quiet assumption that a
+period identifies a game. See `to_canonical`.
 """
 
 from __future__ import annotations
@@ -36,6 +40,11 @@ from engine import SportSpec
 from engine import features as EF
 
 log = logging.getLogger(__name__)
+
+# How many games one date can hold. Two: a doubleheader. Everything that
+# converts between a day and a period goes through this, so the packing is
+# stated once.
+SLOTS = 2
 
 # 162 games. A hitter's line moves slowly and its noise is enormous, so the
 # past keeps mattering far longer than it does over a football season.
@@ -95,6 +104,24 @@ def to_canonical(hist: pd.DataFrame) -> pd.DataFrame:
     `period` is a day index rather than a week, because baseball has no
     weeks. Anything monotonic within a season works, and calling a date a
     week would have every sport's code quietly lying about what it orders by.
+
+    Why a period is half a day
+    --------------------------
+    A period has to identify a GAME, not a date. Every other sport in this
+    project gets away with conflating the two; baseball does not, because a
+    doubleheader puts two games on one date. Using the raw day of year there:
+
+      * the same player gets two rows with the same key, which is the
+        duplicate-key failure the frame validator exists to catch;
+      * and, far worse because nothing raises, every `share_*` feature is
+        computed by grouping on (team, season, period) - so a player's share
+        of his team's hits would be measured against TWO games' worth of team
+        totals and come out at roughly half its true value, on exactly the
+        days when a hitter has double the usual opportunity.
+
+    So a day holds `SLOTS` periods, and a team's games within a date are
+    ordered by game id. A single-game day uses slot 0 and nothing changes.
+    Grading still speaks in days; `mlb_run_grade` multiplies.
     """
     out = hist.copy()
     missing = [c for c in ("player_id", "team", "points") if c not in out]
@@ -104,10 +131,40 @@ def to_canonical(hist: pd.DataFrame) -> pd.DataFrame:
 
     dates = pd.to_datetime(out["date"], errors="coerce")
     out["season"] = dates.dt.year.fillna(0).astype(int)
-    # Day of year: monotonic within a season, gapless enough to order by, and
-    # it never pretends a date is a week.
-    out["period"] = dates.dt.dayofyear.fillna(0).astype(int)
+    doy = dates.dt.dayofyear.fillna(0).astype(int)
+
+    # Rank on the game id, numerically - game_pk is carried as text so that
+    # it survives the CSV cache, and ranking text would be lexicographic.
+    keys = pd.DataFrame({
+        "team": out["team"].astype(str),
+        "season": out["season"],
+        "doy": doy,
+        "gpk": pd.to_numeric(out.get("game_pk"), errors="coerce"),
+    })
+    slot = (keys.groupby(["team", "season", "doy"])["gpk"]
+                .rank(method="dense", na_option="top")
+                .fillna(1).astype(int) - 1)
+    # A third game on one date does not happen in modern baseball. If it ever
+    # does, it collides into slot 1 and the validator says so out loud rather
+    # than this quietly inventing a period that belongs to the next day.
+    slot = slot.clip(lower=0, upper=SLOTS - 1)
+
+    out["period"] = doy * SLOTS + slot
+    n_second = int((slot > 0).sum())
+    if n_second:
+        log.info("doubleheaders: %d rows are the second game of a date",
+                 n_second)
     return out
+
+
+def day_of(period: int) -> int:
+    """The calendar day a period falls on. The inverse of the packing above."""
+    return int(period) // SLOTS
+
+
+def periods_of(day: int) -> tuple[int, int]:
+    """Every period belonging to one calendar day, as (first, last)."""
+    return int(day) * SLOTS, int(day) * SLOTS + SLOTS - 1
 
 
 def split(hist: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
