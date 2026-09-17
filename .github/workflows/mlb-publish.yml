@@ -1,0 +1,135 @@
+name: Publish MLB page
+
+on:
+  schedule:
+    # Baseball is an evening sport. 15:00 UTC catches the afternoon slates,
+    # 21:00 UTC is roughly two hours before a 7pm Eastern first pitch - which
+    # is also when the lineup cards go up, so it is the run whose board is
+    # closest to the one that actually plays.
+    - cron: "0 15 * * *"
+    - cron: "0 21 * * *"
+  workflow_dispatch:
+    inputs:
+      draft_group:
+        description: "Exact draft group (blank = the busiest live slate)"
+        default: ""
+      field:
+        description: "Contest size, for the duplication estimate"
+        default: "100000"
+      sims:
+        description: "Simulations for the server's own lineups"
+        default: "20000"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mlb-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Make the engine importable
+        run: |
+          ENGINE_FILES="__init__.py spec.py frame.py features.py model.py grade.py factors.py cache.py simulate.py ownership.py optimise.py"
+          mkdir -p engine
+          for f in $ENGINE_FILES; do
+            if [ -f "$f" ]; then
+              if [ -f "engine/$f" ] && ! cmp -s "$f" "engine/$f"; then
+                echo "  installing NEWER uploaded $f over engine/$f"
+              else
+                echo "  moving $f -> engine/$f"
+              fi
+              mv -f "$f" "engine/$f"
+            fi
+          done
+          missing=""
+          for f in $ENGINE_FILES; do
+            [ -f "engine/$f" ] || missing="$missing $f"
+          done
+          if [ -n "$missing" ]; then
+            echo "FATAL: these engine files are nowhere in this repo:$missing"
+            exit 1
+          fi
+          python -c "import engine; print('engine imports OK')"
+
+      # Everything offline, BEFORE anything is published. A page built on an
+      # unverified simulator is worse than no page, because it looks finished.
+      - name: Offline checks
+        run: |
+          python test_engine.py
+          python test_mlb_sport.py
+
+      - name: Build the slate file
+        id: build
+        continue-on-error: true
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.draft_group }}" ]; then
+            ARGS="$ARGS --draft-group ${{ inputs.draft_group }}"
+          fi
+          if [ -n "${{ inputs.field }}" ]; then
+            ARGS="$ARGS --field ${{ inputs.field }}"
+          fi
+          if [ -n "${{ inputs.sims }}" ]; then
+            ARGS="$ARGS --sims ${{ inputs.sims }}"
+          fi
+          echo "EFFECTIVE ARGS: $ARGS"
+          python mlb_publish.py $ARGS 2>&1 | tee publish.txt
+
+      - name: Say what happened
+        if: always()
+        run: |
+          if [ "${{ steps.build.outcome }}" = "success" ]; then
+            echo "### MLB slate published" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### PUBLISH FAILED - the page still has the last good data" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+          ls -la docs/data/ 2>/dev/null || echo "docs/data is missing entirely"
+          if [ -f docs/data/manifest.json ]; then
+            { echo '```json'; cat docs/data/manifest.json; echo '```'; } \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no manifest - the page will say it has no slates" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Publish
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          find . -path ./.git -prune -o -name '__pycache__' -print0 2>/dev/null \
+            | xargs -0 rm -rf 2>/dev/null || true
+          git add -A docs engine
+          if git diff --cached --quiet; then
+            echo "nothing changed"
+            exit 0
+          fi
+          git commit -m "MLB slate: $(date -u +%Y-%m-%d\ %H:%M)"
+          git push || (git fetch origin main && git rebase origin/main && git push)
+
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlb-publish-log
+          path: publish.txt
+          retention-days: 14
+          if-no-files-found: warn
