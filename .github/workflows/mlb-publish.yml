@@ -107,6 +107,16 @@ jobs:
           else
             echo "### PUBLISH FAILED - the page still has the last good data" \
               >> "$GITHUB_STEP_SUMMARY"
+            # The error belongs on the run's front page, not twelve clicks
+            # into a collapsed step. Every round spent asking "what did the
+            # log say" is a round not spent fixing what it said.
+            {
+              echo ''
+              echo 'Last 60 lines of the build:'
+              echo '```'
+              tail -n 60 publish.txt 2>/dev/null || echo "(no output captured)"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
           ls -la docs/data/ 2>/dev/null || echo "docs/data is missing entirely"
           if [ -f docs/data/manifest.json ]; then
