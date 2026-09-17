@@ -509,35 +509,75 @@ def build_slate(proj: pd.DataFrame, dg: int, label: str,
         slot_by_id.get(i) or slot_by_name.get(n)
         for i, n in zip(ids[~is_p], norm[~is_p])]
 
-    teams_up = probables["posted_teams"]
-    known = board["team"].astype(str).isin(teams_up)
-    if teams_up and not known.any():
-        log.error("lineups are posted for %s but NONE of those match this "
-                  "board's team codes (%s). No hitter can be confirmed, so "
-                  "none is dropped - but the board is carrying rested hitters "
-                  "and the team codes need reconciling.",
-                  sorted(teams_up)[:6],
-                  sorted(set(board["team"].astype(str)))[:6])
-    else:
-        benched = (~is_p) & known & board["bat"].isna()
-        if benched.any():
-            names = sorted(board.loc[benched, "name"])
-            log.info("  dropped %d hitters not in a posted lineup: %s%s",
-                     len(names), ", ".join(names[:12]),
-                     " ..." if len(names) > 12 else "")
-            board = board[~benched].copy()
-            ids, norm = ids[board.index], norm[board.index]
-            is_p = board["slot"] == "P"
+    # Whether a team's card is posted is decided BY THE PLAYERS, not by
+    # matching team codes.
+    #
+    # The first version compared DraftKings' team string to the league's
+    # abbreviation. When those disagree - and they do; the Athletics alone
+    # have been OAK, ATH and SAC inside two years - no team looks posted, no
+    # hitter is ever dropped, and Nick Kurtz stays on the board at the minimum
+    # salary on a night Tommy White is playing first base. A filter that
+    # depends on two organisations spelling a team the same way is not a
+    # filter.
+    #
+    # So: count how many of each team's priced hitters turned up in a posted
+    # lineup. Five or more and that card is clearly up, and anyone from that
+    # team who is NOT in it is not playing. No team code is ever compared.
+    hit = (~is_p)
+    matched_by_team = (board[hit & board["bat"].notna()]["team"]
+                       .astype(str).value_counts())
+    CARD_IS_UP = 5
+    up = set(matched_by_team[matched_by_team >= CARD_IS_UP].index)
+
+    if up:
+        log.info("  lineup cards up for %d teams: %s", len(up),
+                 ", ".join(f"{t}({matched_by_team[t]})" for t in sorted(up)))
+    thin = matched_by_team[(matched_by_team > 0)
+                           & (matched_by_team < CARD_IS_UP)]
+    if len(thin):
+        log.warning("  %d teams matched only 1-%d hitters (%s) - too few to "
+                    "call the card posted, so nobody from them is dropped",
+                    len(thin), CARD_IS_UP - 1,
+                    ", ".join(f"{t}({n})" for t, n in thin.items()))
+
+    benched = hit & board["team"].astype(str).isin(up) & board["bat"].isna()
+    if benched.any():
+        names = sorted(board.loc[benched, "name"])
+        log.info("  dropped %d hitters NOT in their team's posted lineup: %s",
+                 len(names), ", ".join(names))
+        board = board[~benched].copy()
+        ids, norm = ids[board.index], norm[board.index]
+        is_p = board["slot"] == "P"
+
+    # Once most of the slate's cards are up, an unconfirmed hitter is not an
+    # unknown - he is a man his manager has left out, and the board is simply
+    # slower than the manager. So this stops being opt-in and becomes the
+    # default, because the failure it prevents is the expensive one and the
+    # failure it causes is a slightly smaller pool.
+    #
+    # Waiting for a flag to be ticked is not a safety mechanism. It is a way
+    # of being wrong on the nights somebody forgets.
+    teams_total = int(board["team"].nunique())
+    broadly_posted = len(up) >= max(1, teams_total // 2)
+    loose = (~is_p) & board["bat"].isna()
+    if loose.any() and (confirmed_only or broadly_posted):
+        why = ("--confirmed-only" if confirmed_only
+               else f"{len(up)} of {teams_total} teams have posted")
+        log.info("  dropping %d hitters with no confirmed lineup slot (%s): "
+                 "%s", int(loose.sum()), why,
+                 ", ".join(sorted(board.loc[loose, "name"])[:15]))
+        board = board[~loose].copy()
+        ids, norm = ids[board.index], norm[board.index]
+        is_p = board["slot"] == "P"
+    elif loose.any():
+        log.warning("  %d hitters have no confirmed slot and are being kept - "
+                    "only %d of %d cards are up. They can be rostered, and a "
+                    "rested hitter scores zero.",
+                    int(loose.sum()), len(up), teams_total)
 
     in_order = int(board["bat"].notna().sum())
-    log.info("hitters: %d priced, %d confirmed in a batting order",
+    log.info("hitters: %d on the board, %d confirmed in a batting order",
              int((~is_p).sum()), in_order)
-    if confirmed_only:
-        loose = (~is_p) & board["bat"].isna()
-        if loose.any():
-            log.info("  --confirmed-only: dropping %d hitters with no posted "
-                     "lineup slot", int(loose.sum()))
-            board = board[~loose].copy()
 
     merged = join_board(board, proj)
     pool = merged[merged["player_id"].notna()].copy()
