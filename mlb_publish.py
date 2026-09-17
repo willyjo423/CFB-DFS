@@ -99,6 +99,22 @@ def roster_position(raw: str) -> str | None:
     return first if first in HITTER_SLOTS else None
 
 
+def _id_text(s: pd.Series) -> pd.Series:
+    """A player id as text, via a number, and never via `astype(str)`.
+
+    A column of integers that contains a single missing value becomes float64
+    in pandas, and `str(658796.0)` is "658796.0" - which does not equal
+    "658796" and never will. That is the whole explanation for a join that
+    matched 0 of 278 rows on an id both sides genuinely carry.
+
+    It failed silently because the name fallback picked up 255 of them, so the
+    only visible symptom was a log line nobody had to act on. This is the
+    "a 96% join looks fine and is not" failure, in its exact original form.
+    """
+    num = pd.to_numeric(s, errors="coerce")
+    return num.astype("Int64").astype("string").fillna("")
+
+
 def project_half(hist: pd.DataFrame, which: str) -> pd.DataFrame:
     """Fit one half of the sport and project every player's next outing."""
     spec = MS.SPECS[which]
@@ -124,9 +140,9 @@ def join_board(board: pd.DataFrame, proj: pd.DataFrame) -> pd.DataFrame:
     works at 80% is how the players who changed teams disappear.
     """
     left = board.copy()
-    left["mlb_id"] = left["mlb_id"].astype(str)
+    left["mlb_id"] = _id_text(left["mlb_id"])
     right = proj.copy()
-    right["player_id"] = right["player_id"].astype(str)
+    right["player_id"] = _id_text(right["player_id"])
 
     merged = left.merge(right.drop(columns=["team", "name"]),
                         left_on="mlb_id", right_on="player_id", how="left")
@@ -160,7 +176,9 @@ def slate_players(merged: pd.DataFrame, spec_quantiles: list[float],
     for i, r in merged.reset_index(drop=True).iterrows():
         rows.append({
             "name": str(r["name"]),
-            "pos": str(r["slot"]),
+            # `position` by this point, not `slot` - the engine's own column
+            # name, because the pool has already been renamed for it.
+            "pos": str(r["position"]),
             "team": str(r["team"]),
             "game": str(r.get("game") or ""),
             "salary": int(r["salary"]),
@@ -201,6 +219,25 @@ def loadings_for_page() -> dict:
     return out
 
 
+def board_spec():
+    """A spec whose loadings are keyed the way the BOARD is keyed.
+
+    The simulator looks a player's loadings up by his `position`, and by the
+    time the pool reaches it that column holds DraftKings roster positions -
+    OF and P - while the sport's own spec is keyed by box-score positions -
+    LF, CF, RF, DH, SP, RP. Handing it the raw spec silently dropped every
+    outfielder and every pitcher onto a default loading, which is to say the
+    server's own two lineups were solved against a correlation structure the
+    page's browser search does not share. The two are supposed to be
+    comparable; that is the entire point of shipping both.
+    """
+    import dataclasses
+    return dataclasses.replace(
+        MS.HITTERS,
+        positions=sorted(HITTER_SLOTS | {"P"}),
+        loadings=loadings_for_page())
+
+
 def server_lineups(pool: pd.DataFrame, draws: np.ndarray,
                    own: pd.Series, field_size: int) -> dict:
     """The exact integer program's answer, shipped alongside the browser's.
@@ -231,29 +268,53 @@ def server_lineups(pool: pd.DataFrame, draws: np.ndarray,
     return out
 
 
-def pick_slate(draft_group: int | None) -> tuple[int, str]:
-    slates = MD.slates()
-    if draft_group:
-        row = slates[slates["draft_group"] == draft_group]
-        label = str(row["example"].iloc[0]) if len(row) else "(given)"
-        return int(draft_group), label
-    if slates.empty:
+def candidate_slates(draft_group: int | None, look: int) -> list[tuple]:
+    """Which boards to publish, biggest first.
+
+    Ranking by contest COUNT - which is what the football build does - picked
+    a three-game early slate over the main evening board, because cheap early
+    contests are numerous. Baseball's useful slate is the one with the most
+    games in it, and the only way to know how many games a draft group covers
+    is to fetch it, so the top few by contest count are fetched and then
+    re-sorted by how many teams they actually contain.
+
+    Every one that survives is published. The page already has a slate picker;
+    filling it is more useful than guessing which single board you wanted.
+    """
+    listed = MD.slates()
+    if listed.empty:
         sys.exit("DraftKings is listing no baseball slates right now")
-    row = slates.iloc[0]
-    return int(row["draft_group"]), str(row["example"])
+
+    if draft_group:
+        row = listed[listed["draft_group"] == draft_group]
+        label = str(row["example"].iloc[0]) if len(row) else "(given)"
+        return [(int(draft_group), label, MD.board(int(draft_group)))]
+
+    classic = listed[~listed["game_type"].astype(str)
+                     .str.contains("showdown", case=False, na=False)]
+    out = []
+    for r in classic.head(look).itertuples(index=False):
+        try:
+            board = MD.board(int(r.draft_group))
+        except Exception as exc:                               # noqa: BLE001
+            log.info("draft group %s did not load (%s)", r.draft_group,
+                     str(exc)[:70])
+            continue
+        teams = int(board["team"].nunique())
+        if teams < 2:
+            continue
+        out.append((int(r.draft_group), str(r.example), board, teams))
+    if not out:
+        sys.exit("no baseball board could be loaded")
+    out.sort(key=lambda t: -t[3])
+    log.info("boards found: %s",
+             ", ".join(f"{t[0]} ({t[3]} teams)" for t in out))
+    return [(dg, label, board) for dg, label, board, _ in out]
 
 
-def run(draft_group: int | None, seasons: list[int],
-        field_size: int, sims: int) -> dict:
-    hist = C.load(SPORT, seasons)
-    log.info("%d player-games of history", len(hist))
-
-    proj = pd.concat([project_half(hist, "hitters"),
-                      project_half(hist, "pitchers")], ignore_index=True)
-
-    dg, label = pick_slate(draft_group)
+def build_slate(proj: pd.DataFrame, dg: int, label: str,
+                board: pd.DataFrame, field_size: int, sims: int) -> dict | None:
     log.info("draft group %s: %s", dg, label)
-    board = MD.board(dg)
 
     board["slot"] = board["position"].map(roster_position)
     unknown = board[board["slot"].isna()]
@@ -273,7 +334,8 @@ def run(draft_group: int | None, seasons: list[int],
     pool = merged[merged["player_id"].notna()].copy()
     pool = pool[pd.to_numeric(pool["salary"], errors="coerce").notna()]
     if pool.empty:
-        sys.exit("nothing on this slate joined to the history")
+        log.error("nothing on draft group %s joined to the history", dg)
+        return None
 
     have = float(pd.to_numeric(pool["salary"]).sum()
                  / pd.to_numeric(merged["salary"], errors="coerce").sum())
@@ -283,9 +345,11 @@ def run(draft_group: int | None, seasons: list[int],
     missing = [s for s in set(ROSTER["slots"])
                if not (pool["slot"] == s).any()]
     if missing:
-        sys.exit(f"no projected player can fill {missing} - a legal lineup "
-                 f"does not exist and publishing this would put a page up "
-                 f"that cannot build one")
+        log.error("draft group %s has no projected player for %s - a legal "
+                  "lineup does not exist, so it is skipped rather than "
+                  "published as a board that cannot be built from", dg,
+                  missing)
+        return None
 
     # The engine wants its own column names.
     pool = pool.rename(columns={"slot": "position"})
@@ -298,7 +362,7 @@ def run(draft_group: int | None, seasons: list[int],
     pool["leverage"] = lev
 
     quantiles = list(MS.HITTERS.quantiles)
-    draws = S.simulate(pool, quantiles, sims, spec=MS.HITTERS)
+    draws = S.simulate(pool, quantiles, sims, spec=board_spec())
 
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(
@@ -318,37 +382,38 @@ def run(draft_group: int | None, seasons: list[int],
     return payload
 
 
-def write(payload: dict) -> Path:
+def write(payloads: list[dict]) -> None:
+    """Every slate this run produced, plus a manifest listing exactly those.
+
+    The manifest is rebuilt rather than appended to, and yesterday's files are
+    deleted. A stale slate left in the dropdown is worse than a missing one:
+    it loads, it looks current, and every salary in it is a day old.
+    """
     DATA.mkdir(parents=True, exist_ok=True)
-    name = f"{payload['sport']}_{payload['site']}_{payload['kind']}_" \
-           f"{payload['draft_group']}.json"
-    path = DATA / name
-    path.write_text(json.dumps(payload, separators=(",", ":")))
-    log.info("wrote %s (%.0f KB, %d players)", path,
-             path.stat().st_size / 1024, len(payload["players"]))
-
-    manifest_path = DATA / "manifest.json"
+    fresh = set()
     slates = []
-    if manifest_path.exists():
-        try:
-            slates = json.loads(manifest_path.read_text()).get("slates", [])
-        except json.JSONDecodeError:
-            log.warning("the manifest was unreadable and is being rebuilt")
-    entry = {"sport": payload["sport"], "site": payload["site"],
-             "kind": payload["kind"], "label": payload["label"],
-             "file": f"data/{name}"}
-    slates = [s for s in slates if s.get("file") != entry["file"]]
-    slates.insert(0, entry)
+    for payload in payloads:
+        name = (f"{payload['sport']}_{payload['site']}_{payload['kind']}_"
+                f"{payload['draft_group']}.json")
+        path = DATA / name
+        path.write_text(json.dumps(payload, separators=(",", ":")))
+        fresh.add(name)
+        log.info("wrote %s (%.0f KB, %d players)", path,
+                 path.stat().st_size / 1024, len(payload["players"]))
+        slates.append({"sport": payload["sport"], "site": payload["site"],
+                       "kind": payload["kind"], "label": payload["label"],
+                       "file": f"data/{name}"})
 
-    # A slate whose file no longer exists is dropped rather than listed. The
-    # page has no way to report a 404 except as an empty board.
-    slates = [s for s in slates if (DOCS / s["file"]).exists()]
-    manifest_path.write_text(json.dumps({
-        "updated_at": payload["generated_at"],
+    for old in DATA.glob(f"{SPORT}_*.json"):
+        if old.name not in fresh:
+            old.unlink()
+            log.info("removed stale slate %s", old.name)
+
+    (DATA / "manifest.json").write_text(json.dumps({
+        "updated_at": payloads[0]["generated_at"],
         "slates": slates,
     }, indent=1))
     log.info("manifest lists %d slate(s)", len(slates))
-    return path
 
 
 def main(argv=None) -> int:
@@ -359,23 +424,44 @@ def main(argv=None) -> int:
     p.add_argument("--first-season", type=int, default=2025)
     p.add_argument("--field", type=int, default=100_000)
     p.add_argument("--sims", type=int, default=20_000)
+    p.add_argument("--slates", type=int, default=3,
+                   help="how many boards to publish, biggest first")
+    p.add_argument("--look", type=int, default=8,
+                   help="how many draft groups to fetch before ranking them")
     args = p.parse_args(argv)
 
     seasons = list(range(args.first_season,
                          datetime.now(timezone.utc).year + 1))
-    payload = run(args.draft_group, seasons, args.field, args.sims)
-    write(payload)
+    hist = C.load(SPORT, seasons)
+    log.info("%d player-games of history", len(hist))
+    proj = pd.concat([project_half(hist, "hitters"),
+                      project_half(hist, "pitchers")], ignore_index=True)
+
+    payloads = []
+    for dg, label, board in candidate_slates(args.draft_group, args.look):
+        if len(payloads) >= args.slates:
+            break
+        got = build_slate(proj, dg, label, board, args.field, args.sims)
+        if got:
+            payloads.append(got)
+
+    if not payloads:
+        sys.exit("no slate could be built - nothing was published, so the "
+                 "page keeps whatever it had")
+    write(payloads)
 
     print()
     print("=" * 70)
-    print(f"{len(payload['players'])} players on draft group "
-          f"{payload['draft_group']}")
-    for objective, lu in payload["server_lineups"].items():
-        print(f"  {objective:<5} ${lu['salary']:,}  ceiling {lu['ceiling']}")
-        print(f"        {', '.join(lu['players'])}")
-    if not payload["server_lineups"]:
-        print("  NO server lineup solved - the page will show only the "
-              "browser's own search")
+    for payload in payloads:
+        print(f"{payload['label']}  -  {len(payload['players'])} players "
+              f"(draft group {payload['draft_group']})")
+        for objective, lu in payload["server_lineups"].items():
+            print(f"  {objective:<5} ${lu['salary']:,}  "
+                  f"ceiling {lu['ceiling']}")
+            print(f"        {', '.join(lu['players'])}")
+        if not payload["server_lineups"]:
+            print("  NO server lineup solved - the page will show only the "
+                  "browser's own search")
     return 0
 
 
