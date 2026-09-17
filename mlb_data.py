@@ -185,22 +185,62 @@ def probable_pitchers(date: str) -> dict[str, str]:
     """
     payload = _get(f"{STATS}/schedule",
                    params={"sportId": 1, "date": date, "gameType": "R",
-                           "hydrate": "probablePitcher"})
-    out = {}
+                           "hydrate": "lineups,probablePitcher"})
+    ids, names = {}, {}
+    order_id, order_name, posted_teams = {}, {}, set()
+    games = sides = posted = 0
+
     for day in payload.get("dates") or []:
         for g in day.get("games") or []:
+            games += 1
             teams = g.get("teams") or {}
-            def abbr(side):
-                return (((teams.get(side) or {}).get("team") or {})
-                        .get("abbreviation") or "?")
-            label = f"{abbr('away')} @ {abbr('home')}"
+            lineups = g.get("lineups") or {}
+
             for side in ("home", "away"):
+                info = (teams.get(side) or {}).get("team") or {}
+                team = info.get("abbreviation") or info.get("name") or "?"
+
                 p = (teams.get(side) or {}).get("probablePitcher") or {}
-                if p.get("id") is not None:
-                    out[str(p["id"])] = label
-    log.info("probable pitchers on %s: %d announced across %d games",
-             date, len(out), len({v for v in out.values()}))
-    return out
+                pid, full = p.get("id"), p.get("fullName")
+                if pid is not None or full:
+                    sides += 1
+                    if pid is not None:
+                        ids[str(pid)] = team
+                    if full:
+                        names[normalise(full)] = team
+
+                # The batting order, once it is posted - which is about two
+                # hours before first pitch. Nine names, IN ORDER, and the
+                # order is the point: leading off is roughly one extra plate
+                # appearance a game over batting eighth, which is the single
+                # largest thing separating one hitter's day from another's.
+                nine = lineups.get(f"{side}Players") or []
+                if nine:
+                    posted += 1
+                    posted_teams.add(str(team))
+                    for slot, pl in enumerate(nine, start=1):
+                        if pl.get("id") is not None:
+                            order_id[str(pl["id"])] = slot
+                        if pl.get("fullName"):
+                            order_name[normalise(pl["fullName"])] = slot
+
+    # Both keys are kept for both things, because neither survives alone. The
+    # league's id is correct, and DraftKings' copy of it came back empty for a
+    # whole 278-row board - the run where a filter keyed only on the id would
+    # have dropped every pitcher on the slate rather than only the ones
+    # sitting.
+    log.info("%s: %d games, %d of %d starters announced, %d of %d lineups "
+             "posted (%d batters in order)", date, games, sides, games * 2,
+             posted, games * 2, len(order_id))
+    if games and posted < games * 2:
+        log.warning("%d of %d lineups are not posted yet - those teams' "
+                    "hitters cannot be confirmed, and a hitter who is rested "
+                    "scores zero. Lineups go up about two hours before first "
+                    "pitch.", games * 2 - posted, games * 2)
+    return {"ids": ids, "names": names,
+            "order_id": order_id, "order_name": order_name,
+            "posted_teams": posted_teams,
+            "games": games, "announced": sides, "posted": posted}
 
 
 def boxscore(game_pk: int) -> dict:
