@@ -114,6 +114,9 @@ jobs:
       - name: Engine tests
         run: python test_engine.py
 
+      - name: Baseball tests
+        run: python test_mlb_sport.py
+
       - name: Grade
         run: |
           python mlb_run_grade.py \
