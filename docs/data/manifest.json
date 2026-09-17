@@ -1,5 +1,5 @@
 {
- "updated_at": "2026-09-17T20:18:56+00:00",
+ "updated_at": "2026-09-17T21:12:35+00:00",
  "slates": [
   {
    "sport": "mlb",
@@ -12,8 +12,29 @@
    "sport": "mlb",
    "site": "dk",
    "kind": "classic",
-   "label": "13 games \u00b7 locks 7:05pm et \u00b7 MLB $100K Baseball Pocket Cup mini-MAX",
+   "label": "2 games \u00b7 locks 6:40pm et \u00b7 MLB $8K Extra Inning",
+   "file": "data/mlb_dk_classic_153613.json"
+  },
+  {
+   "sport": "mlb",
+   "site": "dk",
+   "kind": "classic",
+   "label": "11 games \u00b7 locks 7:05pm et \u00b7 MLB $300K Mega 8's",
    "file": "data/mlb_dk_classic_153615.json"
+  },
+  {
+   "sport": "mlb",
+   "site": "dk",
+   "kind": "classic",
+   "label": "4 games \u00b7 locks 8:05pm et \u00b7 MLB $3K Extra Inning",
+   "file": "data/mlb_dk_classic_153620.json"
+  },
+  {
+   "sport": "mlb",
+   "site": "dk",
+   "kind": "classic",
+   "label": "4 games \u00b7 locks 9:38pm et \u00b7 MLB $30K Relay Throw",
+   "file": "data/mlb_dk_classic_153621.json"
   }
  ]
 }
