@@ -144,6 +144,8 @@ footer{border-top:1px solid var(--line);padding-top:16px;font-size:12.5px;
     <span id="status">Loading slates…</span>
   </div>
 
+  <p class="sub mono" id="games" style="margin:-10px 0 0"></p>
+
   <div class="tiles" id="tiles"></div>
 
   <section>
@@ -225,8 +227,16 @@ async function loadSlate(file) {
   drawBoard();
   drawHonesty();
   showServerLineups();
+  // Say which games are in this slate, out loud. "Is this actually the early
+  // slate?" should be answerable by looking, not by trusting the dropdown.
+  const games = [...new Set(SLATE.players.map(p => p.game).filter(Boolean))];
   $("status").textContent =
-    SLATE.players.length + " players · generated " + SLATE.generated_at;
+    SLATE.players.length + " players · " + games.length + " games · " +
+    "draft group " + (SLATE.draft_group || "?") +
+    " · generated " + SLATE.generated_at;
+  $("games").textContent = games.length
+    ? games.join("   ·   ")
+    : "this slate carries no game labels";
 }
 
 /* ------------------------------------------------------- the factor model */
