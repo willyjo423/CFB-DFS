@@ -42,11 +42,29 @@ jobs:
 
           ENGINE_FILES="__init__.py spec.py frame.py features.py model.py grade.py factors.py cache.py simulate.py ownership.py optimise.py"
 
+          # A root copy of an engine file is a NEW UPLOAD, and it wins.
+          #
+          # The steady state of this repo has no engine files in the root -
+          # they were cleaned out once and stay out. So anything that appears
+          # there afterwards can only have come from GitHub's web uploader,
+          # which drops files at the top level, and is therefore newer than
+          # whatever engine/ holds.
+          #
+          # An earlier version of this step assumed the opposite: where both
+          # existed it kept engine/ and deleted the root copy. That silently
+          # threw away a rewritten grade.py and features.py, committed the
+          # deletion, and then ran the tests against the stale code they were
+          # meant to replace. Resolving a conflict is fine; resolving it in
+          # the wrong direction without saying so is not.
           mkdir -p engine
           for f in $ENGINE_FILES; do
-            if [ -f "$f" ] && [ ! -f "engine/$f" ]; then
-              echo "  moving stray $f -> engine/$f"
-              mv "$f" "engine/$f"
+            if [ -f "$f" ]; then
+              if [ -f "engine/$f" ] && ! cmp -s "$f" "engine/$f"; then
+                echo "  installing NEWER uploaded $f over engine/$f"
+              else
+                echo "  moving $f -> engine/$f"
+              fi
+              mv -f "$f" "engine/$f"
             fi
           done
 
