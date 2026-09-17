@@ -130,6 +130,8 @@ footer{border-top:1px solid var(--line);padding-top:16px;font-size:12.5px;
       <input id="overlap" type="number" min="0" max="9" value="3"></div>
     <div class="ctl"><label for="field">Contest size</label>
       <input id="field" type="number" min="2" step="1000" value="100000"></div>
+    <div class="ctl"><label for="stack">Stack size</label>
+      <input id="stack" type="number" min="0" max="5" value="4"></div>
     <div class="ctl"><label for="sims">Simulations</label>
       <select id="sims">
         <option value="20000">20,000</option>
@@ -392,12 +394,33 @@ function normalQuantile(p) {           // Acklam's inverse normal CDF
 // ships with the slate so the two can be compared - but it respects every hard
 // constraint BY CONSTRUCTION, which is the part that must never be wrong: a
 // lineup over the cap or short a position cannot be entered at all.
-function legalLineup(players, roster, weights, rng) {
+function legalLineup(players, roster, weights, rng, opts) {
+  opts = opts || {};
   const slots = roster.slots;
   const showdown = slots.includes("CPT");
   const cap = roster.salary_cap;
   const maxTeam = roster.max_per_team || 99;
   const n = players.length;
+
+  // Two rules baseball does not survive without.
+  //
+  // 1. A hitter and the pitcher he is facing are ONE event bet in two
+  //    directions. Your pitcher needs him to fail; you have paid for both
+  //    outcomes and can only collect on one. The factor model already prices
+  //    them as strongly negatively correlated - the solver simply was not
+  //    told it could not buy both.
+  //
+  // 2. A tournament lineup is mostly a bet that one batting order erupts.
+  //    Runs arrive in clusters within an inning, so four hitters off the same
+  //    card share a fat joint tail that four hitters off four different cards
+  //    do not have, however well projected they are. Left to itself a greedy
+  //    search by points-per-dollar spreads across every game and throws that
+  //    away.
+  const noVsPitcher = roster.no_hitter_vs_pitcher !== false;
+  const stackTeam = opts.stackTeam || null;
+  const stackSize = opts.stackSize || 0;
+  const pitcherOpp = new Set();     // teams whose hitters are now barred
+  const hitterTeams = new Set();    // teams with a hitter already rostered
 
   const eligible = i => !FADE.has(i);
   const order = [...Array(n).keys()].filter(eligible)
@@ -426,6 +449,11 @@ function legalLineup(players, roster, weights, rng) {
 
   const tryAdd = (i, asCaptain) => {
     const p = players[i];
+    const isPitcher = p.pos === "P";
+    if (noVsPitcher) {
+      if (isPitcher && hitterTeams.has(p.opp)) return false;
+      if (!isPitcher && pitcherOpp.has(p.team)) return false;
+    }
     const cost = asCaptain
       ? (p.cpt || Math.round(p.salary * (roster.captain_multiplier || 1.5)))
       : p.salary;
@@ -440,6 +468,7 @@ function legalLineup(players, roster, weights, rng) {
     else { if (flexLeft <= 0) return false; flexLeft--; }
     pick.push({ i, cpt: !!asCaptain, cost });
     teamCount[p.team] = (teamCount[p.team] || 0) + 1;
+    if (isPitcher) pitcherOpp.add(p.opp); else hitterTeams.add(p.team);
     spend += cost;
     return true;
   };
@@ -449,6 +478,25 @@ function legalLineup(players, roster, weights, rng) {
   if (showdown && captain === null) {
     for (const i of order) if (tryAdd(i, true)) break;
   }
+
+  // The stack goes in BEFORE the rest of the board is picked over. Seeded
+  // last, it never survives: by then the cap is spent and the positions the
+  // stack needs are filled. Batting order decides who goes first, because
+  // consecutive slots come to bat in the same innings - a 2-3-4-5 stack is a
+  // materially different bet from a 1-4-7-9 one, even off the same card.
+  if (stackTeam && stackSize > 0) {
+    const mates = [...Array(n).keys()]
+      .filter(i => eligible(i) && players[i].team === stackTeam
+                   && players[i].pos !== "P" && !pick.some(x => x.i === i))
+      .sort((a, b) => (players[a].bat || 99) - (players[b].bat || 99));
+    let taken = 0;
+    for (const i of mates) {
+      if (taken >= stackSize) break;
+      if (tryAdd(i, false)) taken++;
+    }
+    if (taken < stackSize) return null;
+  }
+
   for (const i of order) {
     if (pick.length >= slots.length) break;
     if (pick.some(x => x.i === i)) continue;
@@ -469,6 +517,23 @@ function scoreLineup(draws, sims, pick, mult) {
   return out;
 }
 
+// The biggest same-team group of HITTERS in a lineup. Reported rather than
+// assumed: a stack that the salary cap quietly shrank from four to two is
+// still a lineup, just not the bet that was asked for.
+function biggestStack(players, pick) {
+  const count = new Map();
+  for (const p of pick) {
+    const pl = players[p.i];
+    if (pl.pos === "P") continue;
+    count.set(pl.team, (count.get(pl.team) || 0) + 1);
+  }
+  let best = null;
+  for (const [team, size] of count) {
+    if (!best || size > best.size) best = { team, size };
+  }
+  return best && best.size >= 2 ? best : null;
+}
+
 function quantile(sorted, q) {
   const i = Math.min(sorted.length - 1,
                      Math.max(0, Math.floor(q * (sorted.length - 1))));
@@ -486,6 +551,8 @@ function build() {
   const overlap = Math.max(0, Number($("overlap").value));
   const field = Math.max(2, Number($("field").value) || 100000);
   const objective = $("objective").value;
+  // Zero means "do not force one". Five is DraftKings' hitters-per-team cap.
+  const STACK = Math.max(0, Math.min(5, Number($("stack").value) || 0));
 
   const zq = SLATE.quantiles.map(normalQuantile);
   const plan = buildFactorPlan(players);
@@ -522,10 +589,33 @@ function build() {
     let seed = 12345;
     const rng = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
 
+    // Which teams can even be stacked, and how hard to try each one.
+    //
+    // A cash lineup is not stacked on purpose: beating half the field wants
+    // the steadiest ten players, and correlation widens a distribution rather
+    // than lifting its middle. A tournament wants the opposite.
+    const stackable = [];
+    if (objective !== "cash") {
+      const byTeam = new Map();
+      players.forEach((p, i) => {
+        if (p.pos === "P") return;
+        if (!byTeam.has(p.team)) byTeam.set(p.team, []);
+        byTeam.get(p.team).push(i);
+      });
+      for (const [t, idx] of byTeam) {
+        if (idx.filter(i => !FADE.has(i)).length >= STACK) stackable.push(t);
+      }
+    }
+    const plans = stackable.length
+      ? stackable.map(t => ({ stackTeam: t, stackSize: STACK }))
+      : [{}];
+
     const seen = new Set(), cands = [];
-    for (let k = 0; k < 400 && cands.length < 220; k++) {
+    const tries = Math.max(400, plans.length * 60);
+    for (let k = 0; k < tries && cands.length < 260; k++) {
       const w = mean.map(v => Math.max(v, 0.01));
-      const pick = legalLineup(players, roster, w, rng);
+      const pick = legalLineup(players, roster, w, rng,
+                               plans[k % plans.length]);
       if (!pick) continue;
       const key = pick.map(p => p.i).sort((a, b) => a - b).join(",");
       if (seen.has(key)) continue;
@@ -550,6 +640,7 @@ function build() {
         edge: pg / (1 + dupes),
         salary: pick.reduce((a, p) => a + p.cost, 0),
         own: pick.reduce((a, p) => a + players[p.i].own, 0),
+        stack: biggestStack(players, pick),
       });
     }
 
@@ -612,7 +703,8 @@ function render(chosen, meta) {
         <td>${fmt(pl.med)}</td><td>${fmt(pl.own * 100)}%</td></tr>`;
     }).join("");
     return `<div class="lineup">
-      <h3>Entry ${n + 1}<span class="chip">${esc(meta.objective.toUpperCase())}</span></h3>
+      <h3>Entry ${n + 1}<span class="chip">${esc(meta.objective.toUpperCase())}</span>
+        ${c.stack ? `<span class="chip">${esc(c.stack.team)} x${c.stack.size}</span>` : ""}</h3>
       <div class="scroll"><table><tbody>${rows}</tbody></table></div>
       <div class="stats">
         <span>salary <b>${money(c.salary)}</b> of ${money(SLATE.roster.salary_cap)}</span>
@@ -734,6 +826,18 @@ function drawHonesty() {
     steps, and the missing lineup card above is most of the reason. Weight this
     page accordingly. It is worth more on pitchers and on stacks than it is on
     choosing one hitter over another.
+    <br><br>
+    <b>Two baseball rules the solver now enforces.</b> No hitter is ever
+    rostered against a pitcher in the same lineup — that is one event bet in
+    two directions, and you can only collect on one. And a tournament build
+    forces a same-team stack of the size set above, taken in batting order,
+    because runs arrive in clusters within an inning: four hitters off one
+    card share a fat joint tail that four hitters off four cards do not,
+    however well projected they are. Cash builds are deliberately unstacked —
+    beating half the field wants the steadiest ten players, and correlation
+    widens a distribution rather than lifting its middle. Set the stack to 0
+    to turn it off. Each entry shows the stack it actually achieved, which can
+    be smaller than requested if the salary cap got in the way.
     <br><br>
     <b>The browser search is near-optimal, not provably optimal.</b> It respects
     every hard constraint by construction — salary cap, roster slots, team
