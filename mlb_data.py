@@ -317,6 +317,25 @@ def player_games(box: dict, game: dict) -> list[dict]:
             if not bat and not pit:
                 continue
             pos = (p.get("position") or {}).get("abbreviation")
+            # Where he batted, which the box score has carried all along.
+            #
+            # "100" is leading off as a starter; "201" is the first
+            # substitute in the two hole. The hundreds digit is the slot and
+            # the last two digits are how deep into the substitutions he is,
+            # so a pinch hitter is distinguishable from the man he replaced -
+            # and only starters should teach the model what a slot is worth.
+            #
+            # This is the feature the projections have been missing. Without
+            # it the model cannot tell a leadoff hitter from a nine-hole
+            # hitter except through the plate appearances that result, which
+            # is the effect rather than the cause and arrives a game late.
+            raw_order = str(p.get("battingOrder") or "").strip()
+            slot = started = None
+            if raw_order.isdigit():
+                slot = int(raw_order) // 100
+                started = 1.0 if int(raw_order) % 100 == 0 else 0.0
+                if not 1 <= slot <= 9:
+                    slot = None
             hits = _n(bat.get("hits"))
             doubles = _n(bat.get("doubles"))
             triples = _n(bat.get("triples"))
@@ -329,6 +348,8 @@ def player_games(box: dict, game: dict) -> list[dict]:
                 "position": pos,
                 "game_pk": game.get("game_pk"),
                 "date": game.get("date"),
+                "bat_slot": slot,
+                "bat_started": started,
                 # hitting
                 "single": max(0.0, hits - doubles - triples - hr),
                 "double": doubles, "triple": triples, "home_run": hr,
@@ -420,8 +441,38 @@ def score(df: pd.DataFrame) -> pd.DataFrame:
 
 # ------------------------------------------------------------- draftkings
 
+_DOTNET_DATE = re.compile(r"/Date\((-?\d+)(?:[+-]\d{4})?\)/")
+
+
+def start_time(raw) -> pd.Timestamp:
+    """When a contest locks, in whichever shape DraftKings sends it.
+
+    The lobby sends a .NET date - "/Date(1757894400000)/" - which
+    `pd.to_datetime(..., unit="ms")` cannot read. With errors="coerce" every
+    start time silently becomes NaT, and anything that filters on "has this
+    started" then matches nothing at all. That exact parse cost the football
+    build a whole capability once.
+    """
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return pd.NaT
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return pd.to_datetime(int(raw), unit="ms", utc=True, errors="coerce")
+    s = str(raw).strip()
+    m = _DOTNET_DATE.search(s)
+    if m:
+        return pd.to_datetime(int(m.group(1)), unit="ms", utc=True,
+                              errors="coerce")
+    if s.lstrip("-").isdigit():
+        return pd.to_datetime(int(s), unit="ms", utc=True, errors="coerce")
+    return pd.to_datetime(s, utc=True, errors="coerce")
+
+
 def slates() -> pd.DataFrame:
-    """Every baseball draft group DraftKings is currently selling."""
+    """Every baseball draft group DraftKings is currently selling.
+
+    Carries WHEN each one locks, which is the column that decides which slate
+    is the next one to play rather than merely the biggest one on sale.
+    """
     payload = _get(DK_CONTESTS)
     contests = payload.get("Contests") or []
     if not contests:
@@ -434,14 +485,23 @@ def slates() -> pd.DataFrame:
         r = rows.setdefault(dg, {"draft_group": dg, "contests": 0,
                                  "game_type": c.get("gameType"),
                                  "starts_text": c.get("sdstring"),
+                                 "starts": pd.NaT,
                                  "biggest_prize": 0, "biggest_field": 0,
                                  "example": c.get("n")})
         r["contests"] += 1
         r["biggest_prize"] = max(r["biggest_prize"], c.get("po") or 0)
         r["biggest_field"] = max(r["biggest_field"], c.get("m") or 0)
+        t = start_time(c.get("sd"))
+        if pd.notna(t) and (pd.isna(r["starts"]) or t < r["starts"]):
+            r["starts"] = t
     out = pd.DataFrame(rows.values())
-    log.info("lobby: %d draft groups, %d contests",
-             len(out), int(out["contests"].sum()))
+    got = int(out["starts"].notna().sum())
+    log.info("lobby: %d draft groups, %d contests, %d with a start time",
+             len(out), int(out["contests"].sum()), got)
+    if len(out) and got == 0:
+        log.error("NO draft group has a readable start time - sample %r. "
+                  "Anything choosing the next slate to play will be choosing "
+                  "blind.", (contests[0] or {}).get("sd"))
     return out.sort_values("contests", ascending=False).reset_index(drop=True)
 
 
