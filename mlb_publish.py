@@ -386,7 +386,8 @@ def server_lineups(pool: pd.DataFrame, draws: np.ndarray,
     return out
 
 
-def candidate_slates(draft_group: int | None, look: int) -> list[tuple]:
+def candidate_slates(draft_group: int | None, look: int,
+                     probables: dict) -> list[tuple]:
     """Which boards to publish, biggest first.
 
     Ranking by contest COUNT - which is what the football build does - picked
@@ -410,6 +411,23 @@ def candidate_slates(draft_group: int | None, look: int) -> list[tuple]:
 
     classic = listed[~listed["game_type"].astype(str)
                      .str.contains("showdown", case=False, na=False)]
+
+    # Which day a board is for, decided by whether ITS players are the ones
+    # the league has named for TODAY.
+    #
+    # DraftKings sells tomorrow's slates today, and tomorrow's main slate has
+    # more games in it than whatever is left of this afternoon. Ranking by
+    # size therefore picks tomorrow, confidently, every evening - which is how
+    # a board came back showing BOS @ TB on a night the Athletics were at
+    # Tampa Bay.
+    #
+    # No date is parsed and no timestamp is trusted. Today's probable starters
+    # and today's posted lineups are already in hand, so the test is simply
+    # how many of a board's players are in them. Tomorrow's board scores
+    # nearly zero against today's card, which is exactly the signal wanted.
+    today_keys = (set(probables["ids"]) | set(probables["order_id"]))
+    today_names = (set(probables["names"]) | set(probables["order_name"]))
+
     out = []
     for r in classic.head(look).itertuples(index=False):
         try:
@@ -421,13 +439,32 @@ def candidate_slates(draft_group: int | None, look: int) -> list[tuple]:
         teams = int(board["team"].nunique())
         if teams < 2:
             continue
-        out.append((int(r.draft_group), str(r.example), board, teams))
+        ids = _id_text(board["mlb_id"]).fillna("")
+        norm = board["name"].map(MD.normalise)
+        overlap = int((ids.isin(today_keys) | norm.isin(today_names)).sum())
+        out.append((int(r.draft_group), str(r.example), board, teams, overlap))
+
     if not out:
         sys.exit("no baseball board could be loaded")
-    out.sort(key=lambda t: -t[3])
-    log.info("boards found: %s",
-             ", ".join(f"{t[0]} ({t[3]} teams)" for t in out))
-    return [(dg, label, board) for dg, label, board, _ in out]
+
+    log.info("boards considered:")
+    for dg, label, _, teams, overlap in sorted(out, key=lambda t: -t[4]):
+        log.info("    %-8s %2d teams  %4d players named for today  %s",
+                 dg, teams, overlap, label[:44])
+
+    # At least half a board's teams must have someone on today's card. A board
+    # for another day comes nowhere near that.
+    today = [t for t in out if t[4] >= max(2, t[3] // 2)]
+    if not today:
+        sys.exit("no board on sale has more than a handful of players the "
+                 "league has named for today - every one of them appears to "
+                 "be for a different day. Nothing published.")
+    if len(today) < len(out):
+        log.info("dropped %d board(s) that are not for today",
+                 len(out) - len(today))
+
+    today.sort(key=lambda t: (-t[3], -t[4]))
+    return [(dg, label, board) for dg, label, board, _, _ in today]
 
 
 def build_slate(proj: pd.DataFrame, dg: int, label: str,
@@ -591,6 +628,19 @@ def build_slate(proj: pd.DataFrame, dg: int, label: str,
     log.info("%d of %d priced players projected, %.0f%% of slate salary",
              len(pool), len(merged), 100 * have)
 
+    # A real ten-game classic board carries hundreds of players. Sixty is not
+    # a slate - it is the wreckage of a filter that matched almost nothing, and
+    # publishing it produces lineups drawn from whoever happened to survive.
+    per_slot = pool["slot"].value_counts()
+    thin = {s: int(per_slot.get(s, 0)) for s in set(ROSTER["slots"])
+            if int(per_slot.get(s, 0)) < 2}
+    games_here = int(pool["game"].nunique())
+    if len(pool) < 12 * games_here:
+        log.warning("draft group %s has only %d projectable players across %d "
+                    "games. A classic board of that size normally carries "
+                    "several hundred - treat everything below with suspicion.",
+                    dg, len(pool), games_here)
+
     missing = [s for s in set(ROSTER["slots"])
                if not (pool["slot"] == s).any()]
     if missing:
@@ -707,7 +757,8 @@ def main(argv=None) -> int:
                  f"keeps what it had.")
 
     payloads = []
-    for dg, label, board in candidate_slates(args.draft_group, args.look):
+    for dg, label, board in candidate_slates(args.draft_group, args.look,
+                                            probables):
         if len(payloads) >= args.slates:
             break
         got = build_slate(proj, dg, label, board, probables,
