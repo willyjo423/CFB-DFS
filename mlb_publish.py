@@ -41,6 +41,7 @@ import json
 import logging
 import sys
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import numpy as np
@@ -110,9 +111,15 @@ def _id_text(s: pd.Series) -> pd.Series:
     It failed silently because the name fallback picked up 255 of them, so the
     only visible symptom was a log line nobody had to act on. This is the
     "a 96% join looks fine and is not" failure, in its exact original form.
+
+    Missing stays MISSING - never the empty string. An empty string is a
+    value, and a merge happily matches it against every other empty string on
+    the far side, so one board player without an id fans out into a row for
+    every projection without one. Null never matches null, which is exactly
+    the behaviour wanted here.
     """
     num = pd.to_numeric(s, errors="coerce")
-    return num.astype("Int64").astype("string").fillna("")
+    return num.astype("Int64").astype("string")
 
 
 def project_half(hist: pd.DataFrame, which: str) -> pd.DataFrame:
@@ -144,8 +151,20 @@ def join_board(board: pd.DataFrame, proj: pd.DataFrame) -> pd.DataFrame:
     right = proj.copy()
     right["player_id"] = _id_text(right["player_id"])
 
+    n_in = len(left)
     merged = left.merge(right.drop(columns=["team", "name"]),
                         left_on="mlb_id", right_on="player_id", how="left")
+
+    # A left join must not change the row count. If it does, both sides shared
+    # a key that repeats - and the board would carry a player several times,
+    # each copy with a different projection, which is how an optimiser ends up
+    # fielding the same man twice or filling a slate with rows nobody put on
+    # it. The college build lost 700 rows to 28,350 this way.
+    if len(merged) != n_in:
+        raise SystemExit(
+            f"the projection join fanned {n_in} board rows into "
+            f"{len(merged)}. Duplicate ids on one side; the board is not "
+            f"trustworthy and nothing has been published.")
     by_id = int(merged["player_id"].notna().sum())
 
     miss = merged["player_id"].isna()
@@ -313,7 +332,8 @@ def candidate_slates(draft_group: int | None, look: int) -> list[tuple]:
 
 
 def build_slate(proj: pd.DataFrame, dg: int, label: str,
-                board: pd.DataFrame, field_size: int, sims: int) -> dict | None:
+                board: pd.DataFrame, probables: dict, field_size: int,
+                sims: int) -> dict | None:
     log.info("draft group %s: %s", dg, label)
 
     board["slot"] = board["position"].map(roster_position)
@@ -329,6 +349,31 @@ def build_slate(proj: pd.DataFrame, dg: int, label: str,
         log.info("%d players are flagged unavailable and are dropped",
                  int(gone.sum()))
         board = board[~gone].copy()
+
+    # Only today's announced starters may fill a P slot.
+    #
+    # Without this the board prices every pitcher on every 26-man roster, the
+    # ones not starting are cheap, and points per dollar - the statistic a
+    # pitcher who throws no innings maximises - puts one of them in every
+    # single lineup. That is not a subtle mis-ranking; it is the optimiser
+    # working perfectly on a board that lied to it.
+    ids = _id_text(board["mlb_id"])
+    is_p = board["slot"] == "P"
+    starting = ids.isin(set(probables))
+    drop = is_p & ~starting
+    log.info("pitchers: %d priced, %d are today's announced starters",
+             int(is_p.sum()), int((is_p & starting).sum()))
+    if int((is_p & starting).sum()) < 2:
+        log.error("fewer than two announced starters are priced on draft "
+                  "group %s - the probables are not matching this board, and "
+                  "publishing it would put a pitcher who is not playing into "
+                  "every lineup. Skipped.", dg)
+        return None
+    if drop.any():
+        names = ", ".join(board.loc[drop, "name"].head(6))
+        log.info("dropping %d pitchers who are not starting today (%s%s)",
+                 int(drop.sum()), names, " ..." if int(drop.sum()) > 6 else "")
+        board = board[~drop].copy()
 
     merged = join_board(board, proj)
     pool = merged[merged["player_id"].notna()].copy()
@@ -426,6 +471,8 @@ def main(argv=None) -> int:
     p.add_argument("--sims", type=int, default=20_000)
     p.add_argument("--slates", type=int, default=3,
                    help="how many boards to publish, biggest first")
+    p.add_argument("--date", default=None,
+                   help="slate date YYYY-MM-DD (default: today, US Eastern)")
     p.add_argument("--look", type=int, default=8,
                    help="how many draft groups to fetch before ranking them")
     args = p.parse_args(argv)
@@ -437,11 +484,26 @@ def main(argv=None) -> int:
     proj = pd.concat([project_half(hist, "hitters"),
                       project_half(hist, "pitchers")], ignore_index=True)
 
+    # The baseball day, in US Eastern - which is the day DraftKings and the
+    # league both mean. A 21:00 UTC run is still the same evening in New York,
+    # but a UTC date would already have rolled over for anything after 20:00
+    # Eastern and would ask the league about tomorrow's probables.
+    today = args.date or (datetime.now(timezone.utc)
+                          .astimezone(ZoneInfo("America/New_York"))
+                          .strftime("%Y-%m-%d"))
+    probables = MD.probable_pitchers(today)
+    if not probables:
+        sys.exit(f"the league has announced no probable pitchers for {today}. "
+                 f"Publishing without them puts a pitcher who is not playing "
+                 f"into every lineup, so nothing is published and the page "
+                 f"keeps what it had.")
+
     payloads = []
     for dg, label, board in candidate_slates(args.draft_group, args.look):
         if len(payloads) >= args.slates:
             break
-        got = build_slate(proj, dg, label, board, args.field, args.sims)
+        got = build_slate(proj, dg, label, board, probables,
+                          args.field, args.sims)
         if got:
             payloads.append(got)
 
