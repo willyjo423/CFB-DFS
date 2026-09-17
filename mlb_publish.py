@@ -122,6 +122,36 @@ def _id_text(s: pd.Series) -> pd.Series:
     return num.astype("Int64").astype("string")
 
 
+# Plate appearances by batting-order slot, per nine-inning game.
+#
+# A team takes about 38 plate appearances. They are handed out in order, so
+# each slot down the card loses roughly an eighth of a turn: leading off is
+# about 4.7 and batting ninth about 3.9. That is a ~20% difference in how many
+# chances a man gets, which is the single largest thing separating one hitter's
+# day from another's - larger than almost any difference in ability between two
+# players on the same board.
+#
+# These are league averages, not a fitted effect. The right version measures
+# the slot's effect from history, and cannot be built until the history carries
+# a lineup slot, which it does not yet. So this is arithmetic applied on top of
+# a projection rather than something the model learned - stated plainly here
+# and on the page, because the difference matters.
+PA_BY_SLOT = {1: 4.72, 2: 4.61, 3: 4.50, 4: 4.39, 5: 4.28,
+              6: 4.17, 7: 4.06, 8: 3.95, 9: 3.84}
+
+# A projection is never moved more than this. The multiplier divides by the
+# player's own recent plate appearances, and a small or noisy denominator can
+# otherwise produce a wild number from a arithmetic mistake rather than from
+# information.
+ORDER_CLIP = (0.75, 1.30)
+
+# Columns that scale with opportunity. p_play does not - where a man bats has
+# nothing to do with whether he is in the lineup, and that question has already
+# been answered by the lineup card itself.
+SCALED = ["q10", "q25", "q50", "q75", "q90", "q97",
+          "median", "cond_mean", "mean", "ceiling"]
+
+
 def project_half(hist: pd.DataFrame, which: str) -> pd.DataFrame:
     """Fit one half of the sport and project every player's next outing."""
     spec = MS.SPECS[which]
@@ -129,7 +159,13 @@ def project_half(hist: pd.DataFrame, which: str) -> pd.DataFrame:
     proj = M.Projections(spec).fit(built)
     latest = M.latest_rows(built)
     q = proj.predict(latest)
-    out = latest[["player_id", "name", "team", "position"]].copy()
+    keep = ["player_id", "name", "team", "position"]
+    # Carried so the batting order can be applied RELATIVE to what this player
+    # has actually been getting, rather than to a league average. A man who
+    # already leads off should not be paid twice for leading off tonight.
+    if "ewm_plate_appearances" in latest.columns:
+        keep.append("ewm_plate_appearances")
+    out = latest[keep].copy()
     for c in q.columns:
         out[c] = q[c].to_numpy()
     out["half"] = which
@@ -210,6 +246,11 @@ def slate_players(merged: pd.DataFrame, spec_quantiles: list[float],
             # where it is not. The page shows the difference rather than
             # letting a rested hitter look identical to a confirmed leadoff.
             "bat": (int(r["bat"]) if pd.notna(r.get("bat")) else None),
+            # The probability he takes part at all. The browser gates on this
+            # exactly as the server's simulator does; without it an unconfirmed
+            # player simulates as though he is certain to play.
+            "pp": round(float(r.get("p_play", 1.0) or 1.0), 4),
+            "of": round(float(r.get("order_factor", 1.0) or 1.0), 3),
             "status": ("clear" if str(r["position"]) == "P"
                        or pd.notna(r.get("bat")) else "unconfirmed"),
         })
@@ -240,6 +281,59 @@ def loadings_for_page() -> dict:
         if pit:
             table["P"] = float(pit.get("P", next(iter(pit.values()))))
         out[kind] = table
+    return out
+
+
+def apply_batting_order(pool: pd.DataFrame) -> pd.DataFrame:
+    """Scale every hitter's distribution by the slot he is actually batting in.
+
+    The projection is built from a player's own recent games, which already
+    reflect wherever he has been batting. So the adjustment is a RATIO - the
+    plate appearances tonight's slot is worth, over the plate appearances he
+    has lately been getting - and not a raw slot factor. A regular leadoff man
+    confirmed to lead off comes out at about 1.0, which is right; paying him a
+    leadoff bonus on top of a projection already built from leadoff games would
+    count the same thing twice.
+
+    A hitter promoted from eighth to first moves about 4.72/3.95 = 1.19.
+    A hitter dropped the other way moves about 0.84. Those are real and they
+    are roughly the size of the gap between a good hitter and an average one.
+
+    Pitchers and unconfirmed hitters are untouched: no slot, no adjustment.
+    """
+    out = pool.copy()
+    out["order_factor"] = 1.0
+    if "bat" not in out.columns:
+        return out
+
+    has = out["bat"].notna() & (out["slot"] != "P")
+    if not has.any():
+        log.info("no confirmed batting orders - projections unadjusted")
+        return out
+
+    want = out.loc[has, "bat"].map(lambda s: PA_BY_SLOT.get(int(s)))
+    base = pd.to_numeric(out.loc[has].get("ewm_plate_appearances"),
+                         errors="coerce")
+    # A man with no plate-appearance history gets the middle of the card as his
+    # baseline, which makes the adjustment his slot against an average one.
+    base = base.fillna(float(np.mean(list(PA_BY_SLOT.values()))))
+    base = base.clip(lower=2.5)
+
+    factor = (want / base).clip(*ORDER_CLIP)
+    out.loc[has, "order_factor"] = factor.to_numpy()
+
+    for c in SCALED:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce") * out["order_factor"]
+
+    moved = out.loc[has].assign(f=factor.to_numpy())
+    moved = moved.reindex(moved["f"].sub(1).abs().sort_values(
+        ascending=False).index)
+    log.info("batting order applied to %d hitters (mean factor %.3f)",
+             int(has.sum()), float(factor.mean()))
+    for r in moved.head(8).itertuples(index=False):
+        log.info("    %-22s bats %s  x%.2f", str(r.name)[:22],
+                 int(r.bat), float(r.f))
     return out
 
 
@@ -338,7 +432,7 @@ def candidate_slates(draft_group: int | None, look: int) -> list[tuple]:
 
 def build_slate(proj: pd.DataFrame, dg: int, label: str,
                 board: pd.DataFrame, probables: dict, field_size: int,
-                sims: int) -> dict | None:
+                sims: int, confirmed_only: bool = False) -> dict | None:
     log.info("draft group %s: %s", dg, label)
 
     board["slot"] = board["position"].map(roster_position)
@@ -438,6 +532,12 @@ def build_slate(proj: pd.DataFrame, dg: int, label: str,
     in_order = int(board["bat"].notna().sum())
     log.info("hitters: %d priced, %d confirmed in a batting order",
              int((~is_p).sum()), in_order)
+    if confirmed_only:
+        loose = (~is_p) & board["bat"].isna()
+        if loose.any():
+            log.info("  --confirmed-only: dropping %d hitters with no posted "
+                     "lineup slot", int(loose.sum()))
+            board = board[~loose].copy()
 
     merged = join_board(board, proj)
     pool = merged[merged["player_id"].notna()].copy()
@@ -459,6 +559,8 @@ def build_slate(proj: pd.DataFrame, dg: int, label: str,
                   "published as a board that cannot be built from", dg,
                   missing)
         return None
+
+    pool = apply_batting_order(pool)
 
     # The engine wants its own column names.
     pool = pool.rename(columns={"slot": "position"})
@@ -537,6 +639,8 @@ def main(argv=None) -> int:
                    help="how many boards to publish, biggest first")
     p.add_argument("--date", default=None,
                    help="slate date YYYY-MM-DD (default: today, US Eastern)")
+    p.add_argument("--confirmed-only", action="store_true",
+                   help="drop hitters whose lineup card is not up yet")
     p.add_argument("--look", type=int, default=8,
                    help="how many draft groups to fetch before ranking them")
     args = p.parse_args(argv)
@@ -567,7 +671,7 @@ def main(argv=None) -> int:
         if len(payloads) >= args.slates:
             break
         got = build_slate(proj, dg, label, board, probables,
-                          args.field, args.sims)
+                          args.field, args.sims, args.confirmed_only)
         if got:
             payloads.append(got)
 
