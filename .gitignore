@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.env
+
+# Run outputs, not inputs.
+mlb_graded_*.csv
+cfb_depth.csv
+cfb_ready.csv
+cfb_graded.csv
+
+# The history cache IS committed - refetching it costs 20 minutes.
+!data/
+!data/*.csv.gz
