@@ -163,7 +163,7 @@ footer{border-top:1px solid var(--line);padding-top:16px;font-size:12.5px;
       <table id="board">
         <thead><tr>
           <th class="l">Player</th><th class="l">Pos</th><th class="l">Team</th>
-          <th>Salary</th><th>Median</th><th>Ceiling</th>
+          <th>Bat</th><th>Salary</th><th>Median</th><th>Ceiling</th>
           <th>Per $1k</th><th>Own%</th><th>Leverage</th><th class="l">Lock</th>
         </tr></thead>
         <tbody></tbody>
@@ -633,11 +633,15 @@ function drawBoard() {
   tb.innerHTML = rows.map(({ p, i }) => {
     const per = p.salary ? p.med / (p.salary / 1000) : 0;
     const cls = LOCK.has(i) ? "locked" : FADE.has(i) ? "excluded" : "";
-    const q = p.status === "questionable"
-      ? '<span class="pill q">Q</span>' : "";
+    // A blank batting order is not a ninth-place hitter - it is a hitter
+    // whose card is not posted yet, and he may not play at all. Saying so on
+    // the row is the difference between leverage and a zero.
+    const q = (p.pos !== "P" && (p.bat === null || p.bat === undefined))
+      ? '<span class="pill q">NOT CONFIRMED</span>' : "";
+    const bat = p.pos === "P" ? "—" : (p.bat ? p.bat : "?");
     return `<tr class="${cls}">
       <td class="l">${esc(p.name)}${q}</td><td class="l">${esc(p.pos)}</td>
-      <td class="l">${esc(p.team)}</td><td>${money(p.salary)}</td>
+      <td class="l">${esc(p.team)}</td><td>${bat}</td><td>${money(p.salary)}</td>
       <td>${fmt(p.med)}</td><td>${fmt(p.ceil)}</td><td>${fmt(per, 2)}</td>
       <td>${fmt(p.own * 100)}%</td><td>${fmt(p.lev, 2)}</td>
       <td class="l">
@@ -661,7 +665,7 @@ function drawBoard() {
   };
 
   document.querySelectorAll("#board thead th").forEach((th, n) => {
-    const keys = ["name", "pos", "team", "salary", "med", "ceil", null, "own", "lev"];
+    const keys = ["name", "pos", "team", "bat", "salary", "med", "ceil", null, "own", "lev"];
     th.onclick = () => {
       if (!keys[n]) return;
       SORT = { key: keys[n], dir: SORT.key === keys[n] ? -SORT.dir : -1 };
@@ -687,13 +691,19 @@ function drawHonesty() {
   const slots = (SLATE.roster && SLATE.roster.slots) || [];
   const pitchers = slots.filter(s => s === "P").length || 1;
   $("honesty").innerHTML = `
-    <b>Today's lineup card is not in this model.</b> Where a hitter bats — or
-    whether he is in the lineup at all — is the largest single thing separating
-    one of his days from another, and it is posted about two hours before first
-    pitch. This page does not read it. A hitter who is rested scores zero, and
-    until he does he will look like the best value on the board, because a cheap
-    player carrying a full projection is exactly what that looks like. Check the
-    lineup card before entering anything.
+    <b>Starters and batting orders are read from the league, not guessed.</b>
+    Only a pitcher the league lists as today's probable starter can fill a P
+    slot, and a hitter whose team has posted its card is kept only if he is in
+    it. The <b>Bat</b> column is his place in the order. A <b>?</b> there means
+    that team's card was not up when this was built — he is carried, not
+    confirmed, and he may not play. Cards go up about two hours before first
+    pitch, so the later of the two daily runs is the one to trust.
+    <br><br>
+    <b>The batting order is shown but not yet modelled.</b> Leading off is
+    roughly one extra plate appearance over batting eighth, and the projections
+    on this page do not know the difference — they are fitted on history that
+    carries no lineup slot. So use the column to judge the model's numbers
+    rather than assuming they already contain it.
     <br><br>
     <b>Ownership is modelled, not measured.</b> DraftKings' standings sit behind
     a login, so nothing here counts what the field actually played. The scale is
