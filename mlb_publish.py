@@ -206,7 +206,12 @@ def slate_players(merged: pd.DataFrame, spec_quantiles: list[float],
             "ceil": round(float(r["ceiling"]), 2),
             "own": round(float(own.iloc[i]), 5),
             "lev": round(float(lev.iloc[i]), 3),
-            "status": "clear",
+            # Batting order where the card is posted, and an honest blank
+            # where it is not. The page shows the difference rather than
+            # letting a rested hitter look identical to a confirmed leadoff.
+            "bat": (int(r["bat"]) if pd.notna(r.get("bat")) else None),
+            "status": ("clear" if str(r["position"]) == "P"
+                       or pd.notna(r.get("bat")) else "unconfirmed"),
         })
     return rows
 
@@ -357,23 +362,82 @@ def build_slate(proj: pd.DataFrame, dg: int, label: str,
     # pitcher who throws no innings maximises - puts one of them in every
     # single lineup. That is not a subtle mis-ranking; it is the optimiser
     # working perfectly on a board that lied to it.
-    ids = _id_text(board["mlb_id"])
+    # Matched on the league id AND on the name, because neither key survives on
+    # its own. DraftKings' copy of the league id came back empty for all 278
+    # rows of a live board, and a filter keyed only on that would not have
+    # dropped the pitchers who are not starting - it would have dropped every
+    # pitcher on the slate, skipped the board, published nothing, and left the
+    # page showing yesterday's lineups. Which is indistinguishable, from the
+    # outside, from the filter not working at all.
+    ids = _id_text(board["mlb_id"]).fillna("")
+    norm = board["name"].map(MD.normalise)
     is_p = board["slot"] == "P"
-    starting = ids.isin(set(probables))
+    starting = ids.isin(probables["ids"]) | norm.isin(probables["names"])
+
+    kept = board[is_p & starting]
     drop = is_p & ~starting
-    log.info("pitchers: %d priced, %d are today's announced starters",
-             int(is_p.sum()), int((is_p & starting).sum()))
-    if int((is_p & starting).sum()) < 2:
-        log.error("fewer than two announced starters are priced on draft "
-                  "group %s - the probables are not matching this board, and "
-                  "publishing it would put a pitcher who is not playing into "
-                  "every lineup. Skipped.", dg)
-        return None
+    log.info("pitchers priced %d, announced starters among them %d",
+             int(is_p.sum()), len(kept))
+    if len(kept):
+        log.info("  STARTING: %s", ", ".join(sorted(kept["name"])))
     if drop.any():
-        names = ", ".join(board.loc[drop, "name"].head(6))
-        log.info("dropping %d pitchers who are not starting today (%s%s)",
-                 int(drop.sum()), names, " ..." if int(drop.sum()) > 6 else "")
-        board = board[~drop].copy()
+        names = sorted(board.loc[drop, "name"])
+        log.info("  dropped %d not starting: %s%s", len(names),
+                 ", ".join(names[:12]), " ..." if len(names) > 12 else "")
+    if len(kept) < 2:
+        log.error("draft group %s prices %d pitchers and only %d match the "
+                  "league's probables, so a legal lineup cannot be filled. "
+                  "Both the id and the name failed to match. NOT publishing - "
+                  "the alternative is a page that starts a man who is not "
+                  "playing.", dg, int(is_p.sum()), len(kept))
+        return None
+
+    # The pitchers who are not starting leave now, before anything below reads
+    # the board again. Dropping rows and then reusing an index built from the
+    # old ones is its own class of bug.
+    board = board[~drop].copy()
+    ids, norm = ids[board.index], norm[board.index]
+    is_p = board["slot"] == "P"
+
+    # Hitters: the posted batting order, where it exists.
+    #
+    # A hitter who is rested scores zero, and DraftKings prices him anyway, so
+    # the same arithmetic that put a non-starting pitcher in every lineup puts
+    # a benched hitter there too. The difference is that a lineup card only
+    # goes up about two hours before first pitch, so an afternoon run has to
+    # cope with not knowing yet - and "I do not know" and "he is out" are
+    # different answers. Only teams whose card IS posted can have anyone
+    # dropped; everyone else is carried and marked unconfirmed.
+    board["bat"] = pd.NA
+    slot_by_id = probables["order_id"]
+    slot_by_name = probables["order_name"]
+    board.loc[~is_p, "bat"] = [
+        slot_by_id.get(i) or slot_by_name.get(n)
+        for i, n in zip(ids[~is_p], norm[~is_p])]
+
+    teams_up = probables["posted_teams"]
+    known = board["team"].astype(str).isin(teams_up)
+    if teams_up and not known.any():
+        log.error("lineups are posted for %s but NONE of those match this "
+                  "board's team codes (%s). No hitter can be confirmed, so "
+                  "none is dropped - but the board is carrying rested hitters "
+                  "and the team codes need reconciling.",
+                  sorted(teams_up)[:6],
+                  sorted(set(board["team"].astype(str)))[:6])
+    else:
+        benched = (~is_p) & known & board["bat"].isna()
+        if benched.any():
+            names = sorted(board.loc[benched, "name"])
+            log.info("  dropped %d hitters not in a posted lineup: %s%s",
+                     len(names), ", ".join(names[:12]),
+                     " ..." if len(names) > 12 else "")
+            board = board[~benched].copy()
+            ids, norm = ids[board.index], norm[board.index]
+            is_p = board["slot"] == "P"
+
+    in_order = int(board["bat"].notna().sum())
+    log.info("hitters: %d priced, %d confirmed in a batting order",
+             int((~is_p).sum()), in_order)
 
     merged = join_board(board, proj)
     pool = merged[merged["player_id"].notna()].copy()
@@ -492,7 +556,7 @@ def main(argv=None) -> int:
                           .astimezone(ZoneInfo("America/New_York"))
                           .strftime("%Y-%m-%d"))
     probables = MD.probable_pitchers(today)
-    if not probables:
+    if not probables["announced"] and not probables["posted"]:
         sys.exit(f"the league has announced no probable pitchers for {today}. "
                  f"Publishing without them puts a pitcher who is not playing "
                  f"into every lineup, so nothing is published and the page "
