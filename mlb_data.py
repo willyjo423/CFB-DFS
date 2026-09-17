@@ -166,6 +166,43 @@ def schedule(season: int, start: str | None = None, end: str | None = None
     return df
 
 
+def probable_pitchers(date: str) -> dict[str, str]:
+    """Today's announced starters: player id -> the game he starts in.
+
+    The single most expensive thing a baseball board can get wrong. Every
+    pitcher on a 26-man roster is priced; two of them start. The one who is
+    not starting is cheap, and points per dollar is precisely the statistic a
+    zero-inning pitcher maximises - so every objective picks him, every time.
+    A star appearing in all ten lineups on a day he is not pitching is not a
+    strange result; it is the only result a board without this can give.
+
+    The league announces probables days ahead and publishes them free on the
+    same endpoint the box scores come from. There is no excuse for a page that
+    does not read them.
+
+    An empty result means the league lists none, which the caller must treat
+    as "do not publish" rather than as "nobody is starting today".
+    """
+    payload = _get(f"{STATS}/schedule",
+                   params={"sportId": 1, "date": date, "gameType": "R",
+                           "hydrate": "probablePitcher"})
+    out = {}
+    for day in payload.get("dates") or []:
+        for g in day.get("games") or []:
+            teams = g.get("teams") or {}
+            def abbr(side):
+                return (((teams.get(side) or {}).get("team") or {})
+                        .get("abbreviation") or "?")
+            label = f"{abbr('away')} @ {abbr('home')}"
+            for side in ("home", "away"):
+                p = (teams.get(side) or {}).get("probablePitcher") or {}
+                if p.get("id") is not None:
+                    out[str(p["id"])] = label
+    log.info("probable pitchers on %s: %d announced across %d games",
+             date, len(out), len({v for v in out.values()}))
+    return out
+
+
 def boxscore(game_pk: int) -> dict:
     return _get(f"{STATS}/game/{game_pk}/boxscore")
 
