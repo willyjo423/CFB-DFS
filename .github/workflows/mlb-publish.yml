@@ -19,6 +19,10 @@ on:
       sims:
         description: "Simulations for the server's own lineups"
         default: "20000"
+      confirmed_only:
+        description: "Only hitters in a posted lineup (tick this once cards are up)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -89,6 +93,9 @@ jobs:
           if [ -n "${{ inputs.sims }}" ]; then
             ARGS="$ARGS --sims ${{ inputs.sims }}"
           fi
+          if [ "${{ inputs.confirmed_only }}" = "true" ]; then
+            ARGS="$ARGS --confirmed-only"
+          fi
           echo "EFFECTIVE ARGS: $ARGS"
           python mlb_publish.py $ARGS 2>&1 | tee publish.txt
 
@@ -133,3 +140,21 @@ jobs:
           path: publish.txt
           retention-days: 14
           if-no-files-found: warn
+
+      # The build step is continue-on-error so that a failure leaves the last
+      # good slate on the page instead of blanking it. That is right, and it
+      # also made a run that published NOTHING finish green - which is
+      # indistinguishable, from the Actions list, from a run that worked.
+      #
+      # A whole round was lost to exactly that: a fix was shipped, the job went
+      # green, the page still showed the old lineups, and the obvious reading
+      # was that the fix did not work. It had never run.
+      - name: Fail if nothing was published
+        if: always()
+        run: |
+          if [ "${{ steps.build.outcome }}" != "success" ]; then
+            echo "The slate build failed. The page is unchanged and still"
+            echo "shows whatever it had before this run - which may be hours"
+            echo "or days old. Read the 'Build the slate file' step above."
+            exit 1
+          fi
