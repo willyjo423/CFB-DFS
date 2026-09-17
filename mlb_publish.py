@@ -542,7 +542,8 @@ def candidate_slates(draft_group: int | None, look: int,
 def build_slate(proj: pd.DataFrame, dg: int, label: str,
                 board: pd.DataFrame, probables: dict, field_size: int,
                 sims: int, confirmed_only: bool = False,
-                starts=None) -> dict | None:
+                starts=None, status: dict | None = None,
+                min_salary: int = 0) -> dict | None:
     log.info("draft group %s: %s", dg, label)
 
     board["slot"] = board["position"].map(roster_position)
@@ -558,6 +559,49 @@ def build_slate(proj: pd.DataFrame, dg: int, label: str,
         log.info("%d players are flagged unavailable and are dropped",
                  int(gone.sum()))
         board = board[~gone].copy()
+
+    # The injured list, hours before any lineup card exists.
+    #
+    # A man on the sixty-day list is priced at the minimum, carries a full
+    # projection built from the games he played before he got hurt, and is
+    # therefore the best points-per-dollar on the board. Byron Buxton, hip
+    # impingement, in every lineup it produced.
+    #
+    # Only a player the league has ON a roster and NOT listed active is
+    # dropped. Someone on no roster we read is unknown, not out, and is left
+    # alone - because deleting a man from a slate on the strength of not
+    # having heard of him is how a filter empties a board.
+    if status and status.get("teams_read"):
+        ids0 = _id_text(board["mlb_id"]).fillna("")
+        norm0 = board["name"].map(MD.normalise)
+        seen = ids0.isin(status["seen_ids"]) | norm0.isin(status["seen_names"])
+        active = (ids0.isin(status["active_ids"])
+                  | norm0.isin(status["active_names"]))
+        hurt = seen & ~active
+        if hurt.any():
+            log.info("dropped %d players the league does not list as active "
+                     "(injured list, optioned, suspended): %s",
+                     int(hurt.sum()), ", ".join(sorted(board.loc[hurt,
+                                                                "name"])[:15]))
+            board = board[~hurt].copy()
+        log.info("roster check: %d of %d priced players found on a 40-man, "
+                 "%d of those active", int(seen.sum()), len(seen),
+                 int(active.sum()))
+
+    # A salary floor, off by default and available when you want it.
+    #
+    # The instinct is right - almost every unavailable player sits at the
+    # minimum - but the arrow points the other way. Being hurt makes a man
+    # cheap; being cheap does not make him hurt. September call-ups and
+    # rookies are priced at the minimum too, they start, and they are some of
+    # the best value on a board. Deleting the price band would throw those
+    # away to catch something the roster check above catches by its cause.
+    if min_salary:
+        cheap = pd.to_numeric(board["salary"], errors="coerce") < min_salary
+        if cheap.any():
+            log.info("--min-salary %d: dropping %d players priced below it",
+                     min_salary, int(cheap.sum()))
+            board = board[~cheap].copy()
 
     # Only today's announced starters may fill a P slot.
     #
@@ -811,6 +855,8 @@ def main(argv=None) -> int:
                    help="slate date YYYY-MM-DD (default: today, US Eastern)")
     p.add_argument("--confirmed-only", action="store_true",
                    help="drop hitters whose lineup card is not up yet")
+    p.add_argument("--min-salary", type=int, default=0,
+                   help="drop players priced below this (0 = off)")
     p.add_argument("--look", type=int, default=25,
                    help="how many draft groups to fetch before ranking them")
     args = p.parse_args(argv)
@@ -845,6 +891,15 @@ def main(argv=None) -> int:
                  f"into every lineup, so nothing is published and the page "
                  f"keeps what it had.")
 
+    # Roster status for every team playing, read once and reused per slate.
+    try:
+        status = MD.roster_status(probables.get("team_ids") or [])
+    except Exception as exc:                                   # noqa: BLE001
+        log.error("could not read the rosters (%s: %s) - injured players "
+                  "cannot be filtered out before lineups post",
+                  type(exc).__name__, str(exc)[:90])
+        status = None
+
     payloads = []
     for dg, label, board, starts in candidate_slates(
             args.draft_group, args.look, probables):
@@ -852,7 +907,7 @@ def main(argv=None) -> int:
             break
         got = build_slate(proj, dg, label, board, probables,
                           args.field, args.sims, args.confirmed_only,
-                          starts)
+                          starts, status, args.min_salary)
         if got:
             payloads.append(got)
 
