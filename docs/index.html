@@ -297,6 +297,17 @@ function simulate(players, sims, plan, zq) {
   const G = new Float64Array(plan.nGames), T = new Float64Array(plan.nTeams);
   const comp = new Float64Array(n);
   const curves = players.map(p => p.q);
+  // Every quantile curve on this page is CONDITIONAL on the player taking
+  // part. Without gating on `pp` the browser simulates a man who may not play
+  // as though he certainly will, which is precisely how someone who is not
+  // even active ends up in every lineup: he is cheap, his conditional
+  // projection is full, and points per dollar does the rest.
+  //
+  // The server's simulator has always gated on this. The browser did not, so
+  // the two were answering different questions while being presented side by
+  // side as a comparison.
+  const play = players.map(p => (p.pp === undefined || p.pp === null)
+    ? 1 : Math.max(0, Math.min(1, p.pp)));
 
   for (let s = 0; s < sims; s++) {
     for (let k = 0; k < G.length; k++) G[k] = randn();
@@ -326,7 +337,8 @@ function simulate(players, sims, plan, zq) {
               + plan.tl[i] * T[plan.ti[i]]
               + comp[i]
               + Math.sqrt(plan.idio[i]) * randn();
-      out[i * sims + s] = curveAt(zq, curves[i], z);
+      out[i * sims + s] = play[i] >= 1 || Math.random() < play[i]
+        ? curveAt(zq, curves[i], z) : 0;
     }
   }
   return out;
@@ -699,11 +711,15 @@ function drawHonesty() {
     confirmed, and he may not play. Cards go up about two hours before first
     pitch, so the later of the two daily runs is the one to trust.
     <br><br>
-    <b>The batting order is shown but not yet modelled.</b> Leading off is
-    roughly one extra plate appearance over batting eighth, and the projections
-    on this page do not know the difference — they are fitted on history that
-    carries no lineup slot. So use the column to judge the model's numbers
-    rather than assuming they already contain it.
+    <b>The batting order is in the numbers.</b> Every hitter's whole
+    distribution is scaled by the plate appearances his confirmed slot is worth
+    against the plate appearances he has lately been getting — so a man
+    promoted from eighth to leadoff moves about +19%, and a regular leadoff man
+    confirmed to lead off moves barely at all, because his projection was
+    already built from leadoff games. Hover the <b>Bat</b> column. This is
+    arithmetic applied on top of the model, not something the model learned:
+    the history it was fitted on carries no lineup slot. Fitting the effect
+    properly is the next job.
     <br><br>
     <b>Ownership is modelled, not measured.</b> DraftKings' standings sit behind
     a login, so nothing here counts what the field actually played. The scale is
