@@ -38,12 +38,18 @@ def head(t: str) -> None:
     print("=" * 72)
 
 
-def grade_half(hist: pd.DataFrame, which: str, test_season: int,
-               first: int, last: int) -> tuple[pd.DataFrame, bool]:
-    spec = MS.SPECS[which]
-    head(f"{which.upper()}  ({spec.name})")
+def grade_half(built: pd.DataFrame, which: str, test_season: int,
+               day: int) -> tuple[pd.DataFrame, bool]:
+    """Grade one calendar day.
 
-    built = MS.build(hist, which)
+    A day is `MS.SLOTS` periods rather than one, because a doubleheader is
+    two games, two lineups and two roster decisions - and grading only the
+    first one would quietly drop the days with the most opportunity on them.
+    """
+    spec = MS.SPECS[which]
+    first, last = MS.periods_of(day)
+    head(f"{which.upper()}  ({spec.name})  day {day}")
+
     tr = EF.trainable(built, spec)
     print(f"{len(built):,} rows, {len(tr):,} trainable "
           f"(>= {spec.min_prior_games} prior appearances)")
@@ -119,16 +125,35 @@ def main() -> int:
 
     # Grading every day is 77 refits per half. Weekly is 11, which is plenty
     # to measure calibration and ranking and finishes in a sitting.
+    # Say out loud what the doubleheader packing did, rather than trusting it.
+    canon = MS.to_canonical(hist)
+    second = canon[canon["period"] % MS.SLOTS > 0]
+    dupes = int(canon.duplicated(["player_id", "season", "period"]).sum())
+    print(f"doubleheaders: {second['game_pk'].nunique():,} second games, "
+          f"{len(second):,} player-rows")
+    print(f"duplicate player-period keys after packing: {dupes}")
+    if dupes:
+        bad = canon[canon.duplicated(["player_id", "season", "period"],
+                                     keep=False)]
+        print(bad[["name", "date", "team", "opponent", "game_pk",
+                   "period", "points"]].head(12).to_string(index=False))
+        sys.exit("period still does not identify a game - see the rows above")
+
     days = list(range(args.first_day, args.last_day + 1, args.every))
     print(f"grading {len(days)} days: {days[0]} to {days[-1]} "
           f"every {args.every}")
 
     results = {}
     for which in ("hitters", "pitchers"):
+        # Features are built ONCE per half, not once per graded day. They do
+        # not depend on which day is being graded - only the fit does, and
+        # walk() re-fits per day on its own. Rebuilding here was 22 identical
+        # passes over 140,000 rows.
+        built = MS.build(hist, which)
         frames = []
         allok = True
         for d in days:
-            g, ok = grade_half(hist, which, args.test_season, d, d)
+            g, ok = grade_half(built, which, args.test_season, d)
             if len(g):
                 frames.append(g)
             allok = allok and ok
