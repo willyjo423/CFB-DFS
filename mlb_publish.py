@@ -337,6 +337,26 @@ def apply_batting_order(pool: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def slate_label(pool: pd.DataFrame, starts, raw: str) -> str:
+    """A name that says which board this is.
+
+    Games and lock time, because those are what distinguish an early slate
+    from the main one; DraftKings' contest name is kept on the end because it
+    is the string you will see in their lobby.
+    """
+    games = int(pool["game"].nunique()) if "game" in pool.columns else 0
+    when = ""
+    if starts is not None and pd.notna(starts):
+        t = starts.tz_convert(EASTERN)
+        when = " · locks " + t.strftime("%-I:%M%p ET").lower().replace(
+            "am", "am").replace("pm", "pm")
+    tail = str(raw or "").strip()
+    for cut in (" [", " ["):
+        if cut in tail:
+            tail = tail.split(cut)[0]
+    return f"{games} games{when} · {tail[:38]}"
+
+
 def board_spec():
     """A spec whose loadings are keyed the way the BOARD is keyed.
 
@@ -386,6 +406,34 @@ def server_lineups(pool: pd.DataFrame, draws: np.ndarray,
     return out
 
 
+EASTERN = ZoneInfo("America/New_York")
+
+
+def next_slate_day(now: pd.Timestamp | None = None) -> str:
+    """The date of the next DraftKings baseball slate that has not locked.
+
+    Baseball's day does not end at midnight and a lobby does not care what
+    day it is. What matters is which slate a person can still enter, and after
+    the last first pitch of an evening that is tomorrow's. Reading it off the
+    lock times means the answer is right at four in the afternoon and right
+    again at eleven at night, without either case being special-cased.
+    """
+    listed = MD.slates()
+    now = now or pd.Timestamp.now(tz="UTC")
+    live = listed[listed["starts"].notna() & (listed["starts"] > now)]
+    if live.empty:
+        day = now.tz_convert(EASTERN).strftime("%Y-%m-%d")
+        log.warning("no slate on sale has a future lock time - falling back "
+                    "to the Eastern date, %s", day)
+        return day
+    soonest = live["starts"].min()
+    day = soonest.tz_convert(EASTERN).strftime("%Y-%m-%d")
+    log.info("next slate locks %s (%s Eastern) - building for %s",
+             soonest.strftime("%Y-%m-%d %H:%M UTC"),
+             soonest.tz_convert(EASTERN).strftime("%H:%M"), day)
+    return day
+
+
 def candidate_slates(draft_group: int | None, look: int,
                      probables: dict) -> list[tuple]:
     """Which boards to publish, biggest first.
@@ -407,10 +455,21 @@ def candidate_slates(draft_group: int | None, look: int,
     if draft_group:
         row = listed[listed["draft_group"] == draft_group]
         label = str(row["example"].iloc[0]) if len(row) else "(given)"
-        return [(int(draft_group), label, MD.board(int(draft_group)))]
+        when = row["starts"].iloc[0] if len(row) else pd.NaT
+        return [(int(draft_group), label, MD.board(int(draft_group)), when)]
 
     classic = listed[~listed["game_type"].astype(str)
                      .str.contains("showdown", case=False, na=False)]
+
+    # A slate that has already locked cannot be entered, so it is not a
+    # candidate no matter how big it is.
+    now = pd.Timestamp.now(tz="UTC")
+    before = len(classic)
+    open_now = classic[classic["starts"].isna() | (classic["starts"] > now)]
+    if len(open_now) < before:
+        log.info("%d classic slate(s) have already locked and are ignored",
+                 before - len(open_now))
+    classic = open_now
 
     # Which day a board is for, decided by whether ITS players are the ones
     # the league has named for TODAY.
@@ -429,7 +488,9 @@ def candidate_slates(draft_group: int | None, look: int,
     today_names = (set(probables["names"]) | set(probables["order_name"]))
 
     out = []
-    for r in classic.head(look).itertuples(index=False):
+    for r in classic.sort_values(
+            ["starts", "contests"], ascending=[True, False]
+    ).head(look).itertuples(index=False):
         try:
             board = MD.board(int(r.draft_group))
         except Exception as exc:                               # noqa: BLE001
@@ -442,15 +503,18 @@ def candidate_slates(draft_group: int | None, look: int,
         ids = _id_text(board["mlb_id"]).fillna("")
         norm = board["name"].map(MD.normalise)
         overlap = int((ids.isin(today_keys) | norm.isin(today_names)).sum())
-        out.append((int(r.draft_group), str(r.example), board, teams, overlap))
+        out.append((int(r.draft_group), str(r.example), board, teams,
+                    overlap, r.starts))
 
     if not out:
         sys.exit("no baseball board could be loaded")
 
     log.info("boards considered:")
-    for dg, label, _, teams, overlap in sorted(out, key=lambda t: -t[4]):
-        log.info("    %-8s %2d teams  %4d players named for today  %s",
-                 dg, teams, overlap, label[:44])
+    for dg, label, _, teams, overlap, starts in sorted(out, key=lambda t: -t[4]):
+        when = (starts.tz_convert(EASTERN).strftime("%H:%M ET")
+                if pd.notna(starts) else "  ?  ")
+        log.info("    %-8s %2d teams  %4d named  locks %s  %s",
+                 dg, teams, overlap, when, label[:40])
 
     # At least half a board's teams must have someone on today's card. A board
     # for another day comes nowhere near that.
@@ -463,13 +527,18 @@ def candidate_slates(draft_group: int | None, look: int,
         log.info("dropped %d board(s) that are not for today",
                  len(out) - len(today))
 
-    today.sort(key=lambda t: (-t[3], -t[4]))
-    return [(dg, label, board) for dg, label, board, _, _ in today]
+    # Earliest lock first, so the dropdown reads Early, Afternoon, Main,
+    # Night - the order a person actually thinks in. Size is only a tiebreak.
+    today.sort(key=lambda t: (t[5] if pd.notna(t[5]) else pd.Timestamp.max
+                              .tz_localize("UTC"), -t[3]))
+    return [(dg, label, board, starts)
+            for dg, label, board, _, _, starts in today]
 
 
 def build_slate(proj: pd.DataFrame, dg: int, label: str,
                 board: pd.DataFrame, probables: dict, field_size: int,
-                sims: int, confirmed_only: bool = False) -> dict | None:
+                sims: int, confirmed_only: bool = False,
+                starts=None) -> dict | None:
     log.info("draft group %s: %s", dg, label)
 
     board["slot"] = board["position"].map(roster_position)
@@ -672,7 +741,14 @@ def build_slate(proj: pd.DataFrame, dg: int, label: str,
         "site": "dk",
         "kind": "classic",
         "draft_group": dg,
-        "label": label,
+        # What the dropdown says. DraftKings' own contest name is a marketing
+        # string - "MLB $3.9K Perfect Game [$2K to 1st] (Early)" - that barely
+        # identifies the board. The two facts which actually tell one slate
+        # from another are how many games it covers and when it locks, so
+        # those lead and the marketing trails.
+        "label": slate_label(pool, starts, label),
+        "locks": (starts.isoformat()
+                  if starts is not None and pd.notna(starts) else None),
         "field_size": field_size,
         "quantiles": quantiles,
         "loadings": loadings_for_page(),
@@ -725,13 +801,13 @@ def main(argv=None) -> int:
     p.add_argument("--first-season", type=int, default=2025)
     p.add_argument("--field", type=int, default=100_000)
     p.add_argument("--sims", type=int, default=20_000)
-    p.add_argument("--slates", type=int, default=3,
+    p.add_argument("--slates", type=int, default=8,
                    help="how many boards to publish, biggest first")
     p.add_argument("--date", default=None,
                    help="slate date YYYY-MM-DD (default: today, US Eastern)")
     p.add_argument("--confirmed-only", action="store_true",
                    help="drop hitters whose lineup card is not up yet")
-    p.add_argument("--look", type=int, default=8,
+    p.add_argument("--look", type=int, default=25,
                    help="how many draft groups to fetch before ranking them")
     args = p.parse_args(argv)
 
@@ -742,14 +818,23 @@ def main(argv=None) -> int:
     proj = pd.concat([project_half(hist, "hitters"),
                       project_half(hist, "pitchers")], ignore_index=True)
 
-    # The baseball day, in US Eastern - which is the day DraftKings and the
-    # league both mean. A 21:00 UTC run is still the same evening in New York,
-    # but a UTC date would already have rolled over for anything after 20:00
-    # Eastern and would ask the league about tomorrow's probables.
-    today = args.date or (datetime.now(timezone.utc)
-                          .astimezone(ZoneInfo("America/New_York"))
-                          .strftime("%Y-%m-%d"))
-    probables = MD.probable_pitchers(today)
+    # WHICH DAY, decided by the next slate that has not locked - not by the
+    # clock, and not by "today".
+    #
+    # "Today" is the wrong question and asking it is what produced a board
+    # full of tomorrow's games. At four in the afternoon the next slate is
+    # tonight's; at eleven at night every one of today's games has finished
+    # and the next slate on sale is tomorrow's, which is the one worth
+    # publishing. Pinning the target to the calendar meant that after the last
+    # first pitch the league had no games left to name, every board on sale
+    # was correctly judged "not today", and NOTHING was published - so the
+    # page kept showing the stale file it already had.
+    #
+    # So the slate is chosen first, from its lock time, and the lineup card is
+    # then fetched for whatever day that slate belongs to.
+    day = args.date or next_slate_day()
+    probables = MD.probable_pitchers(day)
+    today = day
     if not probables["announced"] and not probables["posted"]:
         sys.exit(f"the league has announced no probable pitchers for {today}. "
                  f"Publishing without them puts a pitcher who is not playing "
@@ -757,15 +842,17 @@ def main(argv=None) -> int:
                  f"keeps what it had.")
 
     payloads = []
-    for dg, label, board in candidate_slates(args.draft_group, args.look,
-                                            probables):
+    for dg, label, board, starts in candidate_slates(
+            args.draft_group, args.look, probables):
         if len(payloads) >= args.slates:
             break
         got = build_slate(proj, dg, label, board, probables,
-                          args.field, args.sims, args.confirmed_only)
+                          args.field, args.sims, args.confirmed_only,
+                          starts)
         if got:
             payloads.append(got)
 
+    payloads.sort(key=lambda p: (p.get("locks") or "9999"))
     if not payloads:
         sys.exit("no slate could be built - nothing was published, so the "
                  "page keeps whatever it had")
