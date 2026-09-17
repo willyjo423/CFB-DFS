@@ -236,6 +236,10 @@ def slate_players(merged: pd.DataFrame, spec_quantiles: list[float],
             "pos": str(r["position"]),
             "team": str(r["team"]),
             "game": str(r.get("game") or ""),
+            # Who he is facing. Without this the solver cannot know that a
+            # hitter and the pitcher he is batting against are the same bet
+            # twice, in opposite directions.
+            "opp": str(r.get("opponent") or ""),
             "salary": int(r["salary"]),
             "q": [round(float(r[c]), 3) for c in qcols],
             "med": round(float(r["median"]), 2),
