@@ -61,6 +61,21 @@ HITTERS = SportSpec(
     halflife=HALFLIFE,
     min_train_rows=2000,
     min_played_rows=1500,
+    # Where he is batting TONIGHT, and where he usually bats.
+    #
+    # `bat_slot` is deliberately NOT shifted, and that is not a leak. Every
+    # other feature here describes games already played, because the thing it
+    # predicts has not happened yet - but the lineup card is published about
+    # two hours before first pitch, so tonight's slot is genuinely known
+    # before tonight's game. It is the same class of feature as a market line
+    # in football: forward-looking, and the only input in the set that knows
+    # something the player's own history cannot.
+    #
+    # `ewm_bat_slot` comes along automatically as a usage column would not -
+    # it is listed here so the model can see the DIFFERENCE between where a
+    # man usually bats and where he is batting today, which is exactly the
+    # information a promotion or a demotion carries.
+    extra_features=["bat_slot", "ewm_bat_slot", "bat_started"],
     loadings={
         # A batting order is a queue: team-mates score in the same innings
         # off the same pitcher, so the team term is strong and the
@@ -184,11 +199,39 @@ def split(hist: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     return hitters, pitchers
 
 
+def _with_order(built: pd.DataFrame) -> pd.DataFrame:
+    """Add where a man USUALLY bats, alongside where he is batting today.
+
+    Deliberately not folded into the spec's usage columns. Usage is coerced
+    with `fillna(0)`, and a batting slot of zero is not a missing slot - it is
+    a tenth place in the order that does not exist, and the model would learn
+    from it. A pitcher, who has no slot at all, would be handed one.
+
+    So the rolling version is built here, where a missing slot can stay
+    missing. The shift comes from the engine's own `ewm`, so this cannot
+    reintroduce the leak by forgetting it.
+    """
+    out = built.sort_values(["player_id", "season", "period"]).reset_index(
+        drop=True)
+    for c in ("bat_slot", "bat_started"):
+        out[c] = pd.to_numeric(out.get(c), errors="coerce")
+    out["ewm_bat_slot"] = (out.groupby("player_id", sort=False)["bat_slot"]
+                           .transform(lambda s: EF.ewm(s, HALFLIFE)))
+    have = float(out["bat_slot"].notna().mean()) if len(out) else 0.0
+    log.info("batting order present on %.0f%% of rows", 100 * have)
+    if have < 0.5:
+        log.warning("fewer than half the rows carry a batting slot. If this "
+                    "history was fetched before the box-score parser learned "
+                    "to read `battingOrder`, re-fetch it - the feature will "
+                    "otherwise be mostly missing and worth nothing.")
+    return out
+
+
 def build(hist: pd.DataFrame, which: str) -> pd.DataFrame:
     """Features for one half of the sport."""
     hitters, pitchers = split(hist)
     if which == "hitters":
-        return EF.build(hitters, HITTERS)
+        return _with_order(EF.build(hitters, HITTERS))
     if which == "pitchers":
         return EF.build(pitchers, PITCHERS)
     raise ValueError(f"which must be 'hitters' or 'pitchers', got {which!r}")
