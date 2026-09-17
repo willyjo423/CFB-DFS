@@ -188,6 +188,7 @@ def probable_pitchers(date: str) -> dict[str, str]:
                            "hydrate": "lineups,probablePitcher"})
     ids, names = {}, {}
     order_id, order_name, posted_teams = {}, {}, set()
+    team_ids: set[int] = set()
     games = sides = posted = 0
 
     for day in payload.get("dates") or []:
@@ -199,6 +200,8 @@ def probable_pitchers(date: str) -> dict[str, str]:
             for side in ("home", "away"):
                 info = (teams.get(side) or {}).get("team") or {}
                 team = info.get("abbreviation") or info.get("name") or "?"
+                if info.get("id") is not None:
+                    team_ids.add(int(info["id"]))
 
                 p = (teams.get(side) or {}).get("probablePitcher") or {}
                 pid, full = p.get("id"), p.get("fullName")
@@ -239,8 +242,79 @@ def probable_pitchers(date: str) -> dict[str, str]:
                     "pitch.", games * 2 - posted, games * 2)
     return {"ids": ids, "names": names,
             "order_id": order_id, "order_name": order_name,
-            "posted_teams": posted_teams,
+            "posted_teams": posted_teams, "team_ids": sorted(team_ids),
             "games": games, "announced": sides, "posted": posted}
+
+
+# A player is available only if the league says "Active". Everything else -
+# the injured lists, reassignment to the minors, suspension, the restricted
+# list - means he cannot appear tonight whatever DraftKings charges for him.
+#
+# Listing the ACTIVE code rather than the unavailable ones is deliberate. New
+# status codes appear every year, and a blocklist silently treats an unknown
+# one as fine; an allowlist treats it as unavailable, which is the safe
+# direction when the cost of being wrong is a zero in a ten-man lineup.
+ACTIVE_STATUS = {"A"}
+
+
+def roster_status(team_ids: list[int]) -> dict:
+    """Who is actually available, per the league's own roster.
+
+    The lineup card answers this too, but only about two hours before first
+    pitch. Before that a man on the sixty-day injured list is simply a cheap
+    player with a full projection, and points per dollar picks him every time.
+    Byron Buxton, out with a hip impingement, priced at the minimum, in every
+    lineup the board produced.
+
+    Returns both what is ACTIVE and everyone SEEN, because the difference
+    between them is what makes this safe: a board player found on a roster and
+    not active is out, and a board player found on no roster at all is unknown
+    and is left alone. Not knowing and knowing he is out are different
+    answers, and only one of them justifies deleting a man from the slate.
+    """
+    active_ids, active_names = set(), set()
+    seen_ids, seen_names = set(), set()
+    out_rows, failed = [], []
+
+    for tid in team_ids:
+        try:
+            payload = _get(f"{STATS}/teams/{tid}/roster",
+                           params={"rosterType": "40Man"})
+        except Unavailable as exc:
+            failed.append(tid)
+            log.warning("roster for team %s unavailable (%s)", tid,
+                        str(exc)[:70])
+            continue
+        for row in payload.get("roster") or []:
+            person = row.get("person") or {}
+            pid, full = person.get("id"), person.get("fullName")
+            code = ((row.get("status") or {}).get("code") or "").strip()
+            if pid is None and not full:
+                continue
+            key_id = str(pid) if pid is not None else None
+            key_nm = normalise(full) if full else None
+            if key_id:
+                seen_ids.add(key_id)
+            if key_nm:
+                seen_names.add(key_nm)
+            if code in ACTIVE_STATUS:
+                if key_id:
+                    active_ids.add(key_id)
+                if key_nm:
+                    active_names.add(key_nm)
+            else:
+                out_rows.append((full, code,
+                                 (row.get("status") or {}).get("description")))
+
+    log.info("rosters: %d teams read, %d active players, %d listed "
+             "unavailable", len(team_ids) - len(failed), len(active_ids),
+             len(out_rows))
+    if failed:
+        log.warning("%d team roster(s) did not load - their players cannot be "
+                    "checked and are left alone", len(failed))
+    return {"active_ids": active_ids, "active_names": active_names,
+            "seen_ids": seen_ids, "seen_names": seen_names,
+            "out": out_rows, "teams_read": len(team_ids) - len(failed)}
 
 
 def boxscore(game_pk: int) -> dict:
