@@ -83,6 +83,7 @@ jobs:
           # measured strictly before the game. This asserts that, and asserts
           # that the assertion can fail.
           python test_opp_starter.py
+          python test_statcast.py
 
       - name: Build the slate file
         id: build
