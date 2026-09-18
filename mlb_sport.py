@@ -432,15 +432,34 @@ def _with_statcast(built: pd.DataFrame, statcast, side: str) -> pd.DataFrame:
     s["game_pk"] = s["game_pk"].astype(str)
     s["player_id"] = s["player_id"].astype(str)
 
+    # A Statcast problem must NEVER stop a board going out.
+    #
+    # This is the injury guard's lesson applied before it costs anything. A
+    # duplicate key in the cache would raise out of here, and project_half is
+    # called once for the whole run rather than per slate - so a supplementary
+    # feed with a bad row would take down every board on the night, for a
+    # feature that is switched off by default and contributes nothing to the
+    # projection. The failure is loud, and then the run continues without it.
     n_in = len(out)
     out["game_pk"] = out["game_pk"].astype(str)
     out["player_id"] = out["player_id"].astype(str)
-    out = out.merge(s, on=["game_pk", "player_id"], how="left",
-                    validate="m:1")
-    if len(out) != n_in:
-        raise SystemExit(
-            f"the Statcast join changed the row count ({n_in} -> {len(out)}), "
-            f"so (game_pk, player_id) is not unique in the cache.")
+    try:
+        merged = out.merge(s, on=["game_pk", "player_id"], how="left",
+                           validate="m:1")
+        if len(merged) != n_in:
+            raise ValueError(
+                f"row count changed {n_in} -> {len(merged)}")
+        out = merged
+    except Exception as exc:                                   # noqa: BLE001
+        log.error("the Statcast join failed (%s: %s) - continuing WITHOUT "
+                  "it. (game_pk, player_id) is probably not unique in the "
+                  "cache; re-fetch it. The board is unaffected because these "
+                  "features are off unless a grade has said otherwise.",
+                  type(exc).__name__, str(exc)[:90])
+        for c in rate_cols:
+            out[c] = np.nan
+            out[f"ewm_{c}"] = np.nan
+        return out
 
     out = out.sort_values(["player_id", "season", "period"]).reset_index(
         drop=True)
