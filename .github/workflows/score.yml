@@ -1,0 +1,89 @@
+# Grade a board we published against the contest that actually happened.
+#
+# This is the only workflow here that reads ground truth about a BET rather
+# than a projection. DraftKings publishes a contest's standings once, to the
+# people who entered it, and that export carries every player's real ownership
+# and real score. Nothing else we run can see any of that.
+#
+# How to use it
+# -------------
+#   1. Download the contest standings CSV from DraftKings (My Contests ->
+#      the finished contest -> Export).
+#   2. Commit it into contests/ in this repo. The name does not matter.
+#   3. Run this workflow. Give it the draft group of the slate you played -
+#      the number the page shows under the slate picker, and the same number
+#      in the publish log.
+#
+# The report lands in the run summary, and is also uploaded as an artifact.
+name: Score a slate
+
+on:
+  workflow_dispatch:
+    inputs:
+      draft_group:
+        description: "Draft group of the slate you played (e.g. 153501)"
+        required: true
+      contest:
+        description: "Contest CSV in contests/ (blank = the newest one there)"
+        required: false
+      me:
+        description: "Your DraftKings username"
+        required: false
+        default: "gdl23"
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # score_slates.py is standard library only, on purpose: this has to run
+      # even when a dependency change has broken everything else.
+      - name: Find the contest file
+        id: find
+        run: |
+          set -e
+          if [ -n "${{ inputs.contest }}" ]; then
+            CSV="contests/${{ inputs.contest }}"
+          else
+            CSV=$(ls -t contests/*.csv 2>/dev/null | head -1 || true)
+          fi
+          if [ -z "$CSV" ] || [ ! -f "$CSV" ]; then
+            echo "::error::No contest CSV found. Commit the DraftKings standings export into contests/ first."
+            ls -la contests/ 2>/dev/null || echo "contests/ does not exist"
+            exit 1
+          fi
+          echo "csv=$CSV" >> "$GITHUB_OUTPUT"
+          echo "using $CSV"
+
+      - name: Score it
+        run: |
+          python score_slates.py \
+            --board "${{ inputs.draft_group }}" \
+            --contest "${{ steps.find.outputs.csv }}" \
+            --me "${{ inputs.me }}" \
+            --out score.txt | tee score_console.txt
+
+      - name: Put the report in the summary
+        if: always()
+        run: |
+          {
+            echo '## Slate score'
+            echo '```'
+            cat score.txt 2>/dev/null || tail -c 40000 score_console.txt \
+              || echo "(nothing captured)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: slate-score
+          path: |
+            score.txt
+            score_console.txt
+          retention-days: 30
+          if-no-files-found: warn
