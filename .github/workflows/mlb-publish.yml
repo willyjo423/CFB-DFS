@@ -78,6 +78,11 @@ jobs:
         run: |
           python test_engine.py
           python test_mlb_sport.py
+          # The opposing-starter feature is forward-looking by design, so the
+          # only thing between it and a leak is that the starter's own form is
+          # measured strictly before the game. This asserts that, and asserts
+          # that the assertion can fail.
+          python test_opp_starter.py
 
       - name: Build the slate file
         id: build
