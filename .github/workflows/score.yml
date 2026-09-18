@@ -24,7 +24,7 @@ on:
         description: "Draft group of the slate you played (e.g. 153501)"
         required: true
       contest:
-        description: "Contest CSV in contests/ (blank = the newest one there)"
+        description: "Contest CSV filename (blank = newest one found)"
         required: false
       me:
         description: "Your DraftKings username"
@@ -46,14 +46,29 @@ jobs:
         id: find
         run: |
           set -e
+          # Looked for anywhere sensible, not just contests/. Creating a
+          # folder on github.com means typing a path into the new-file screen,
+          # and pasting a contest export into that box risks mangling
+          # thousands of rows with nothing to show it happened. Dragging the
+          # file onto the repo root is the safe route, so the root is a
+          # supported place to leave it.
           if [ -n "${{ inputs.contest }}" ]; then
-            CSV="contests/${{ inputs.contest }}"
+            CSV=$(find . -name "${{ inputs.contest }}" -not -path "./.git/*" \
+                  | head -1)
           else
-            CSV=$(ls -t contests/*.csv 2>/dev/null | head -1 || true)
+            CSV=$(find contests . -maxdepth 1 -name "contest-standings*.csv" \
+                    -not -path "./.git/*" 2>/dev/null \
+                  | head -1)
+            if [ -z "$CSV" ]; then
+              CSV=$(find . -name "*.csv" -not -path "./.git/*" \
+                      -not -path "./docs/*" 2>/dev/null | head -1)
+            fi
           fi
           if [ -z "$CSV" ] || [ ! -f "$CSV" ]; then
-            echo "::error::No contest CSV found. Commit the DraftKings standings export into contests/ first."
-            ls -la contests/ 2>/dev/null || echo "contests/ does not exist"
+            echo "::error::No contest CSV found. Upload the DraftKings standings export to the repo (root or contests/) first."
+            echo "CSV files in the repo:"
+            find . -name "*.csv" -not -path "./.git/*" | head -20 \
+              || echo "  none"
             exit 1
           fi
           echo "csv=$CSV" >> "$GITHUB_OUTPUT"
