@@ -1,0 +1,94 @@
+# Build the Statcast cache: pitch-level data, reduced to player-games.
+#
+# Run this ONCE per season, then only to refresh the current one. A season is
+# roughly 700,000 pitches fetched a week at a time, so expect 10-25 minutes
+# per season. What gets committed is the aggregate - a few megabytes - not the
+# pitches.
+#
+# The features this feeds are OFF by default. Fetching changes nothing about
+# any board until STATCAST_HITTER_FEATURES is switched on in mlb_sport.py and
+# a grade run says it helps.
+name: MLB statcast
+
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: "Seasons to fetch, space separated (e.g. 2025 2026)"
+        required: true
+        default: "2025 2026"
+      refresh:
+        description: "Seasons to re-download even if cached (e.g. 2026)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  statcast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      # The parser is checked before a long download, not after. Discovering
+      # a column rename 20 minutes in is 20 minutes wasted.
+      - name: Offline checks
+        run: python test_statcast.py
+
+      - name: Fetch
+        id: fetch
+        continue-on-error: true
+        run: |
+          ARGS="--seasons ${{ inputs.seasons }}"
+          if [ -n "${{ inputs.refresh }}" ]; then
+            ARGS="$ARGS --refresh ${{ inputs.refresh }}"
+          fi
+          echo "EFFECTIVE ARGS: $ARGS"
+          python mlb_statcast.py $ARGS 2>&1 | tee statcast.txt
+
+      - name: Say what happened
+        if: always()
+        run: |
+          {
+            echo '## Statcast fetch'
+            echo '```'
+            tail -c 30000 statcast.txt 2>/dev/null || echo "(no output)"
+            echo '```'
+            echo '### Cache'
+            ls -la data/mlb_statcast_* 2>/dev/null || echo "NOTHING was cached"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit the cache
+        if: steps.fetch.outcome == 'success'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f data/mlb_statcast_*.csv.gz || true
+          git diff --staged --quiet && echo "nothing changed" && exit 0
+          git commit -m "Statcast: $(date -u +%Y-%m-%d\ %H:%M)"
+          git pull --rebase --autostash origin main || true
+          git push
+
+      # Fails red if nothing landed. A fetch that quietly cached nothing and
+      # reported success is how a feature ends up switched on against an empty
+      # column.
+      - name: Fail if nothing was cached
+        if: always()
+        run: |
+          if ! ls data/mlb_statcast_*.csv.gz >/dev/null 2>&1; then
+            echo "::error::No Statcast cache was written. Savant may be \
+          unreachable from the runner, or its CSV columns have changed - the \
+          log above says which."
+            exit 1
+          fi
+          echo "cached:"
+          ls -la data/mlb_statcast_*.csv.gz
