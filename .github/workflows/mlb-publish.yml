@@ -84,6 +84,7 @@ jobs:
           # that the assertion can fail.
           python test_opp_starter.py
           python test_statcast.py
+          python test_board_dedup.py
 
       - name: Build the slate file
         id: build
