@@ -1,11 +1,11 @@
 {
- "updated_at": "2026-09-18T17:35:12+00:00",
+ "updated_at": "2026-09-18T21:11:26+00:00",
  "slates": [
   {
    "sport": "mlb",
    "site": "dk",
    "kind": "classic",
-   "label": "2 games \u00b7 locks 6:40pm et \u00b7 MLB $8K Extra Inning",
+   "label": "2 games \u00b7 locks 6:40pm et \u00b7 MLB $1K Extra Inning (Turbo)",
    "file": "data/mlb_dk_classic_153613.json"
   },
   {
@@ -14,6 +14,13 @@
    "kind": "classic",
    "label": "13 games \u00b7 locks 7:05pm et \u00b7 MLB $300K Mega 8's",
    "file": "data/mlb_dk_classic_153615.json"
+  },
+  {
+   "sport": "mlb",
+   "site": "dk",
+   "kind": "classic",
+   "label": "13 games \u00b7 locks 7:05pm et \u00b7 MLB Tiers $3K Knuckleball",
+   "file": "data/mlb_dk_classic_153616.json"
   },
   {
    "sport": "mlb",
@@ -33,7 +40,21 @@
    "sport": "mlb",
    "site": "dk",
    "kind": "classic",
-   "label": "9 games \u00b7 locks 7:05pm et \u00b7 MLB $100K Baseball Pocket Cup Qualifie",
+   "label": "3 games \u00b7 locks 4:05pm et \u00b7 MLB $30K Relay Throw",
+   "file": "data/mlb_dk_classic_153737.json"
+  },
+  {
+   "sport": "mlb",
+   "site": "dk",
+   "kind": "classic",
+   "label": "3 games \u00b7 locks 6:10pm et \u00b7 MLB $5K Extra Inning",
+   "file": "data/mlb_dk_classic_153740.json"
+  },
+  {
+   "sport": "mlb",
+   "site": "dk",
+   "kind": "classic",
+   "label": "9 games \u00b7 locks 7:05pm et \u00b7 MLB $70K Relay Throw",
    "file": "data/mlb_dk_classic_153742.json"
   }
  ]
