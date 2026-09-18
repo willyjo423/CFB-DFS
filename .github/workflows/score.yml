@@ -10,9 +10,10 @@
 #   1. Download the contest standings CSV from DraftKings (My Contests ->
 #      the finished contest -> Export).
 #   2. Commit it into contests/ in this repo. The name does not matter.
-#   3. Run this workflow. Give it the draft group of the slate you played -
-#      the number the page shows under the slate picker, and the same number
-#      in the publish log.
+#   3. Run this workflow. Leave everything blank - the standings export never
+#      names the draft group, so the board is found by matching the contest's
+#      players against every board in docs/data. Nine starting pitchers and
+#      ninety-six hitters do not coincide with the wrong board by accident.
 #
 # The report lands in the run summary, and is also uploaded as an artifact.
 name: Score a slate
@@ -21,8 +22,9 @@ on:
   workflow_dispatch:
     inputs:
       draft_group:
-        description: "Draft group of the slate you played (e.g. 153501)"
-        required: true
+        description: "Draft group (blank = work it out from the contest)"
+        required: false
+        default: "auto"
       contest:
         description: "Contest CSV filename (blank = newest one found)"
         required: false
@@ -77,7 +79,7 @@ jobs:
       - name: Score it
         run: |
           python score_slates.py \
-            --board "${{ inputs.draft_group }}" \
+            --board "${{ inputs.draft_group || 'auto' }}" \
             --contest "${{ steps.find.outputs.csv }}" \
             --me "${{ inputs.me }}" \
             --out score.txt | tee score_console.txt
