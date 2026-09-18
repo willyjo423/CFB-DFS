@@ -1,13 +1,6 @@
 {
- "updated_at": "2026-09-17T21:46:54+00:00",
+ "updated_at": "2026-09-18T15:17:18+00:00",
  "slates": [
-  {
-   "sport": "mlb",
-   "site": "dk",
-   "kind": "classic",
-   "label": "5 games \u00b7 locks 7:15pm et \u00b7 MLB $85K Walk-Off Home Run",
-   "file": "data/mlb_dk_classic_153604.json"
-  },
   {
    "sport": "mlb",
    "site": "dk",
@@ -19,7 +12,7 @@
    "sport": "mlb",
    "site": "dk",
    "kind": "classic",
-   "label": "11 games \u00b7 locks 7:05pm et \u00b7 MLB $300K Mega 8's",
+   "label": "13 games \u00b7 locks 7:05pm et \u00b7 MLB $300K Mega 8's",
    "file": "data/mlb_dk_classic_153615.json"
   },
   {
@@ -35,6 +28,13 @@
    "kind": "classic",
    "label": "4 games \u00b7 locks 9:38pm et \u00b7 MLB $30K Relay Throw",
    "file": "data/mlb_dk_classic_153621.json"
+  },
+  {
+   "sport": "mlb",
+   "site": "dk",
+   "kind": "classic",
+   "label": "9 games \u00b7 locks 7:05pm et \u00b7 MLB $100K Baseball Pocket Cup Qualifie",
+   "file": "data/mlb_dk_classic_153742.json"
   }
  ]
 }
