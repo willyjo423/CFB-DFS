@@ -1,5 +1,5 @@
 {
- "updated_at": "2026-09-18T21:11:26+00:00",
+ "updated_at": "2026-09-18T21:40:40+00:00",
  "slates": [
   {
    "sport": "mlb",
@@ -19,7 +19,7 @@
    "sport": "mlb",
    "site": "dk",
    "kind": "classic",
-   "label": "13 games \u00b7 locks 7:05pm et \u00b7 MLB Tiers $3K Knuckleball",
+   "label": "12 games \u00b7 locks 7:05pm et \u00b7 MLB Tiers $3K Knuckleball",
    "file": "data/mlb_dk_classic_153616.json"
   },
   {
