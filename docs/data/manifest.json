@@ -1,41 +1,6 @@
 {
- "updated_at": "2026-09-18T21:40:40+00:00",
+ "updated_at": "2026-09-19T15:16:21+00:00",
  "slates": [
-  {
-   "sport": "mlb",
-   "site": "dk",
-   "kind": "classic",
-   "label": "2 games \u00b7 locks 6:40pm et \u00b7 MLB $1K Extra Inning (Turbo)",
-   "file": "data/mlb_dk_classic_153613.json"
-  },
-  {
-   "sport": "mlb",
-   "site": "dk",
-   "kind": "classic",
-   "label": "13 games \u00b7 locks 7:05pm et \u00b7 MLB $300K Mega 8's",
-   "file": "data/mlb_dk_classic_153615.json"
-  },
-  {
-   "sport": "mlb",
-   "site": "dk",
-   "kind": "classic",
-   "label": "12 games \u00b7 locks 7:05pm et \u00b7 MLB Tiers $3K Knuckleball",
-   "file": "data/mlb_dk_classic_153616.json"
-  },
-  {
-   "sport": "mlb",
-   "site": "dk",
-   "kind": "classic",
-   "label": "4 games \u00b7 locks 8:05pm et \u00b7 MLB $3K Extra Inning",
-   "file": "data/mlb_dk_classic_153620.json"
-  },
-  {
-   "sport": "mlb",
-   "site": "dk",
-   "kind": "classic",
-   "label": "4 games \u00b7 locks 9:38pm et \u00b7 MLB $30K Relay Throw",
-   "file": "data/mlb_dk_classic_153621.json"
-  },
   {
    "sport": "mlb",
    "site": "dk",
@@ -54,8 +19,22 @@
    "sport": "mlb",
    "site": "dk",
    "kind": "classic",
-   "label": "9 games \u00b7 locks 7:05pm et \u00b7 MLB $70K Relay Throw",
+   "label": "8 games \u00b7 locks 7:05pm et \u00b7 MLB $85K Walk-Off Home Run",
    "file": "data/mlb_dk_classic_153742.json"
+  },
+  {
+   "sport": "mlb",
+   "site": "dk",
+   "kind": "classic",
+   "label": "2 games \u00b7 locks 9:10pm et \u00b7 MLB $15K Relay Throw",
+   "file": "data/mlb_dk_classic_153748.json"
+  },
+  {
+   "sport": "mlb",
+   "site": "dk",
+   "kind": "classic",
+   "label": "10 games \u00b7 locks 1:10pm et \u00b7 MLB $100K Baseball Pocket Cup Qualifie",
+   "file": "data/mlb_dk_classic_153752.json"
   }
  ]
 }
