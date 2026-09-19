@@ -1,13 +1,6 @@
 {
- "updated_at": "2026-09-19T15:16:21+00:00",
+ "updated_at": "2026-09-19T21:11:29+00:00",
  "slates": [
-  {
-   "sport": "mlb",
-   "site": "dk",
-   "kind": "classic",
-   "label": "3 games \u00b7 locks 4:05pm et \u00b7 MLB $30K Relay Throw",
-   "file": "data/mlb_dk_classic_153737.json"
-  },
   {
    "sport": "mlb",
    "site": "dk",
@@ -33,8 +26,15 @@
    "sport": "mlb",
    "site": "dk",
    "kind": "classic",
-   "label": "10 games \u00b7 locks 1:10pm et \u00b7 MLB $100K Baseball Pocket Cup Qualifie",
+   "label": "10 games \u00b7 locks 1:10pm et \u00b7 MLB $15K Relay Throw",
    "file": "data/mlb_dk_classic_153752.json"
+  },
+  {
+   "sport": "mlb",
+   "site": "dk",
+   "kind": "classic",
+   "label": "4 games \u00b7 locks 4:07pm et \u00b7 MLB $3K Extra Inning",
+   "file": "data/mlb_dk_classic_153757.json"
   }
  ]
 }
